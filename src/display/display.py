@@ -1,6 +1,8 @@
 import os
+import random
 import re
 import sys
+import ctypes
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
@@ -24,12 +26,23 @@ def log(*args):
 
 
 # ------------------------------- Tweaks ----------------------------------
-MASCOT_SCALE = 0.35
+user32 = ctypes.windll.user32
+SCREEN_WITDH = user32.GetSystemMetrics(0)
+SCREEN_HEIGHT = user32.GetSystemMetrics(1)
+
+MASCOT_SCALE = (SCREEN_WITDH / 1067) * 0.15
 INPUT_BOX = (0.272, 0.020, 0.776, 0.800)  # (left, top, right, bottom) fractions
 INPUT_PADDING = 14  # screen px padding inside input area
 INPUT_FONT_PX = 70  # natural px, scaled by MASCOT_SCALE
 INPUT_TEXT_COLOR = QColor(0x13, 0x13, 0x13)
 CARET_BLINK_MS = 530
+
+# Wandering
+WANDER_INTERVAL_MS = 33          # ~30 ticks/sec
+WANDER_TURN_TICKS = (60, 90)     # re-pick direction every 2-3 seconds
+WANDER_VX_CHOICES = (-2, -1, 0, 1, 2)   # px per tick
+WANDER_VY_CHOICES = (0, )          # use (0,) to keep it on a horizontal line
+DRAG_COOLDOWN_TICKS = 90         # pause wandering ~3s after you drop it
 
 
 class MascotDisplay(QWidget):
@@ -96,6 +109,13 @@ class MascotDisplay(QWidget):
     self.dragMascotY = 0
     self.dragThreshold = QApplication.startDragDistance()
 
+    # Autonomous wandering
+    self.vx = 0
+    self.vy = 0
+    self.stepCounter = 0
+    self.turnAt = random.randint(*WANDER_TURN_TICKS)
+    self.dragCooldown = 0
+
     # Text Input & Caret
     self.inputText = ""
     self.caretOn = True
@@ -115,6 +135,11 @@ class MascotDisplay(QWidget):
     self.caretTimer.timeout.connect(self._onCaretTick)
     self.caretTimer.start()
 
+    # Wander Timer (started in run(), once there is a sprite to move)
+    self.wanderTimer = QTimer(self)
+    self.wanderTimer.setInterval(WANDER_INTERVAL_MS)
+    self.wanderTimer.timeout.connect(self._updateWander)
+
   # ------------------------------------------------------------- Lifecycle
   def run(self) -> int:
     """Sizes window to primary screen, initializes sprite, shows window, and runs loop."""
@@ -130,11 +155,12 @@ class MascotDisplay(QWidget):
 
     drawW, drawH = self._spriteSize(self.currentSprite)
     self.mascotX = (self.width() - drawW) // 2
-    self.mascotY = (self.height() - drawH) // 2
+    self.mascotY = (self.height() - drawH)
 
     self.show()
     self.raise_()
     self.activateWindow()
+    self.wanderTimer.start()
 
     if self._owns_app:
       return self._app.exec()
@@ -148,6 +174,66 @@ class MascotDisplay(QWidget):
       self.mascot.setReaction(reaction)
     self._setSprite(self.mascot.getNextImage())
     self.update()
+
+  # --------------------------------------------------------------- Wandering
+  def _wanderBounds(self) -> QRect:
+    """Walkable area in window coords (the primary screen minus taskbar/dock)."""
+    screen = self.screen()
+    avail = screen.availableGeometry()
+    geo = screen.geometry()
+    return QRect(avail.x() - geo.x(), avail.y() - geo.y(),
+                 avail.width(), avail.height())
+
+  def _updateWander(self):
+    """One tick of autonomous wandering; the mascot bounces off the screen edges."""
+    # Don't wander while the user is dragging, typing, or before the first sprite.
+    if self.dragging or self.isScrolling or self.currentSprite is None:
+      return
+
+    # Count down the pause after a drag.
+    if self.dragCooldown > 0:
+      self.dragCooldown -= 1
+      return
+
+    # Every ~2-3 seconds pick a new velocity: walk left, walk right, or idle.
+    self.stepCounter += 1
+    if self.stepCounter > self.turnAt:
+      self.stepCounter = 0
+      self.turnAt = random.randint(*WANDER_TURN_TICKS)
+      self.vx = random.choice(WANDER_VX_CHOICES)
+      self.vy = random.choice(WANDER_VY_CHOICES)
+
+    if self.vx == 0 and self.vy == 0:
+      return
+
+    drawW, drawH = self._spriteSize(self.currentSprite)
+    bounds = self._wanderBounds()
+    minX, minY = bounds.x(), bounds.y()
+    maxX = bounds.x() + bounds.width() - drawW
+    maxY = bounds.y() + bounds.height() - drawH
+
+    newX = self.mascotX + self.vx
+    newY = self.mascotY + self.vy
+
+    # Bounce back when hitting the edges.
+    if newX <= minX:
+      newX = minX
+      self.vx = abs(self.vx)
+    elif newX >= maxX:
+      newX = maxX
+      self.vx = -abs(self.vx)
+
+    if newY <= minY:
+      newY = minY
+      self.vy = abs(self.vy)
+    elif newY >= maxY:
+      newY = maxY
+      self.vy = -abs(self.vy)
+
+    oldRect = QRect(self.mascotX, self.mascotY, drawW, drawH)
+    if self._moveMascot(newX, newY):
+      # The window is fullscreen, so only repaint the area that changed.
+      self.update(oldRect.united(QRect(self.mascotX, self.mascotY, drawW, drawH)))
 
   # ------------------------------------------------------------- Sprites
   def _loadSprite(self, path: str) -> QPixmap:
@@ -375,6 +461,11 @@ class MascotDisplay(QWidget):
       self.dragging = False
       self.unsetCursor()
 
+      if not wasClick:
+        # Let go somewhere new: stand still for a moment before wandering again.
+        self.dragCooldown = DRAG_COOLDOWN_TICKS
+        self.vx = self.vy = 0
+
       pos = event.position().toPoint()
       # Clicks outside the scroll box toggle scroll mode
       if wasClick and not self._inInput(pos.x(), pos.y()):
@@ -414,7 +505,6 @@ class MascotDisplay(QWidget):
         return
 
     super().keyPressEvent(event)
-
 
 def handleSubmit(text):
   print("submitted:", text)
