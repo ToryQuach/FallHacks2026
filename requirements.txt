@@ -1,2 +1,4 @@
-google.genai
+google-genai
 pydantic
+python-dotenv
+pillow

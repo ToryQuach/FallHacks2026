@@ -17,7 +17,7 @@ if not api_key:
     raise ValueError("GEMINI_API_KEY not found in .env file or environment.")
 
 # Default to Gemma 4 (falls back to gemma-4-31b-it or whatever you specify in .env)
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemma-4-31b-it")
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 
 client = genai.Client(api_key=api_key)
 
@@ -136,14 +136,10 @@ def get_sidekick_response(
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
-from PIL import ImageGrab
-
 if __name__ == "__main__":
-    screenshot_path = "temp_screen.png"
-    
-    # Grab the active display screen and save
-    screenshot = ImageGrab.grab()
-    screenshot.save(screenshot_path)
+    # Use the saved screenshot in src/history (path is relative to this file,
+    # so it works no matter which folder you run the script from)
+    screenshot_path = str(Path(__file__).resolve().parent.parent / "history" / "temp_screen.png")
 
     result = get_sidekick_response(
         image_path=screenshot_path,
