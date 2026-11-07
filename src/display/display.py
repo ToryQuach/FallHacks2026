@@ -1,10 +1,19 @@
 from __future__ import unicode_literals
 
+import re
 import os
 import sys
+import traceback
 import ctypes as ct
 
 from mascot import Mascot
+
+DEBUG = True    # prints sprite changes and any exception; set False when done
+
+def log(*args):
+    if DEBUG:
+        print('[mascot]', *args)
+        sys.stdout.flush()
 
 # --------------------------------------------------------------- Win32 types
 BYTE = ct.c_ubyte
@@ -282,7 +291,6 @@ DIB_RGB_COLORS = 0
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
-
 SM_CXDRAG = 68
 SM_CYDRAG = 69
 
@@ -294,6 +302,8 @@ SW_SHOWNORMAL = 1
 WM_DESTROY = 2
 WM_PAINT = 15
 WM_KEYDOWN = 0x0100
+WM_CHAR = 0x0102
+WM_TIMER = 0x0113
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
@@ -302,43 +312,45 @@ VK_ESCAPE = 0x1B
 
 ERROR_CLASS_ALREADY_EXISTS = 1410
 
+TEXT_RENDERING_ANTIALIAS = 4
+UNIT_PIXEL = 2
+COMBINE_REPLACE = 0
+# NoFitBlackBox | MeasureTrailingSpaces | NoClip  (wrapping is done in Python)
+STRING_FORMAT_FLAGS = 0x0004 | 0x0800 | 0x4000
+
+INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
+
 # ------------------------------- tweaks ----------------------------------
 # Sprites are 1336x948 PNGs; the default draws them at this fraction of
 # natural size. Pass MascotDisplay(scale=...) to override:
 # 0.25 = small, 0.5 = half size, 1.0 = full size.
 MASCOT_SCALE = 0.35
 
-WM_CHAR = 0x0102
-WM_TIMER = 0x0113
-CARET_TIMER_ID = 1
-CARET_BLINK_MS = 530
-
-TEXT_RENDERING_ANTIALIAS = 4
-UNIT_PIXEL = 2
-COMBINE_REPLACE = 0
-# NoFitBlackBox | MeasureTrailingSpaces | NoWrap | LineLimit | NoClip
-STRING_FORMAT_FLAGS = 0x0004 | 0x0800 | 0x1000 | 0x2000 | 0x4000
-
-# Input box per sprite: (left, top, right, bottom) in the PNG's natural pixels,
-# keyed by file name. These numbers are estimated from a preview, so check
-# them in an image editor and adjust.
-INPUT_RECTS = {
-    'scroll_input_long.png': (700, 20, 2000, 715),
-}
-INPUT_PADDING = 40          # natural px of space inside the box edges
-INPUT_FONT_PX = 120         # natural px; scaled by MASCOT_SCALE like the sprite
+# The input box is active while the mascot is in SCROLL mode. Its position is
+# (left, top, right, bottom) as FRACTIONS of the sprite's width/height, so it
+# works at any image resolution or scale. Estimated from the preview of
+# scroll_input_long.png (cream area); nudge these if the text sits off-center.
+INPUT_BOX = (0.272, 0.020, 0.776, 0.800)
+INPUT_PADDING = 14          # screen px of space inside the box edges
+INPUT_FONT_PX = 70          # natural px; scaled by MASCOT_SCALE (was 120)
 INPUT_TEXT_ARGB = 0xFF131313
 
+CARET_TIMER_ID = 1
+CARET_BLINK_MS = 530
 # -------------------------------------------------------------------------
-INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
 
 # Window handle -> MascotDisplay, so the shared WNDPROC can find its instance.
 _instances = {}
 
 def _windowProc(hwnd, message, wParam, lParam):
-    display = _instances.get(hwnd)
-    if display is not None:
-        return display.handleMessage(hwnd, message, wParam, lParam)
+    # Exceptions inside a ctypes callback are easy to miss, so print them.
+    try:
+        display = _instances.get(hwnd)
+        if display is not None:
+            return display.handleMessage(hwnd, message, wParam, lParam)
+    except Exception:
+        traceback.print_exc()
+        sys.stderr.flush()
     return DefWindowProc(hwnd, message, wParam, lParam)
 
 # Kept alive for the process lifetime; WNDCLASS stores only a pointer to it.
@@ -348,9 +360,11 @@ class MascotDisplay(object):
     """Fullscreen, always-on-top, per-pixel-alpha window showing a mascot.
 
     Create one and call run() to start it; Esc closes the window.
+    onSubmit(text) is called when Enter is pressed in the SCROLL input box.
     """
 
-    def __init__(self, scale=MASCOT_SCALE, title='Python Window', className='MainWin', onSubmit=None):
+    def __init__(self, scale=MASCOT_SCALE, title='Python Window',
+                 className='MainWin', onSubmit=None):
         self.scale = scale
         self.title = title
         self.className = className
@@ -410,14 +424,13 @@ class MascotDisplay(object):
             self._createSurface()
             self._createWindow(wndclass)
             SetTimer(self.hwnd, CARET_TIMER_ID, CARET_BLINK_MS, None)
-            
-            self.sizeAllCursor = LoadCursor(None, IDC_SIZEALL)
-            wndclass = self._registerClass()
-            self._createSurface()
-            self._createWindow(wndclass)
 
             # Start with the sprite centered on screen.
-            self.currentSprite = self.mascot.getNextImage()
+            first = self.mascot.getNextImage()
+            if not first:
+                raise RuntimeError('Mascot.getNextImage() returned %r' % (first,))
+            self.currentSprite = str(first)
+            log('first sprite:', self.currentSprite)
             drawW, drawH = self._spriteSize(self.currentSprite)
             self.mascotX = (self.surfaceWidth - drawW) // 2
             self.mascotY = (self.surfaceHeight - drawH) // 2
@@ -425,7 +438,7 @@ class MascotDisplay(object):
 
             ShowWindow(self.hwnd, SW_SHOWNORMAL)
             # Borderless windows don't always take focus on their own; needed
-            # for Esc.
+            # for Esc and typing.
             SetForegroundWindow(self.hwnd)
 
             return self._messageLoop()
@@ -448,6 +461,14 @@ class MascotDisplay(object):
         for bitmap in self.spriteCache.values():
             GdipDisposeImage(bitmap)
         self.spriteCache.clear()
+
+        for handle, delete in ((self._textFormat, GdipDeleteStringFormat),
+                               (self._textBrush, GdipDeleteBrush),
+                               (self._font, GdipDeleteFont),
+                               (self._fontFamily, GdipDeleteFontFamily)):
+            if handle is not None:
+                delete(handle)
+        self._textFormat = self._textBrush = self._font = self._fontFamily = None
 
         if self._gdiplusToken is not None:
             GdiplusShutdown(self._gdiplusToken)
@@ -527,7 +548,10 @@ class MascotDisplay(object):
         bitmap = self.spriteCache.get(path)
         if bitmap is None:
             bitmap = ct.c_void_p()
-            GdipCreateBitmapFromFile(path, ct.byref(bitmap))
+            try:
+                GdipCreateBitmapFromFile(path, ct.byref(bitmap))
+            except RuntimeError as exc:
+                raise RuntimeError('%s (path=%r)' % (exc, path))
             self.spriteCache[path] = bitmap
         return bitmap
 
@@ -556,8 +580,12 @@ class MascotDisplay(object):
     def _setSprite(self, path):
         """Swap the current sprite, keeping its center fixed on screen."""
         if not path:
+            log('getNextImage() returned %r; keeping current sprite' % (path,))
             return
         path = str(path)
+        if path == self.currentSprite:
+            return
+        log('sprite ->', path)
         if self.currentSprite is None:
             self.currentSprite = path
             return
@@ -566,12 +594,160 @@ class MascotDisplay(object):
         cx = self.mascotX + oldW // 2
         cy = self.mascotY + oldH // 2
 
-        self.currentSprite = path
-        newW, newH = self._spriteSize(path)
-
         # _moveMascot measures the sprite in self.currentSprite, so set that
         # first. It also clamps the result to stay fully on screen.
+        self.currentSprite = path
+        newW, newH = self._spriteSize(path)
         self._moveMascot(cx - newW // 2, cy - newH // 2)
+
+    # ------------------------------------------------------------- text input
+    def _createTextResources(self):
+        family = ct.c_void_p()
+        for name in ('Segoe UI', 'Arial'):
+            try:
+                GdipCreateFontFamilyFromName(name, None, ct.byref(family))
+                break
+            except RuntimeError:
+                continue
+        else:
+            raise RuntimeError('no usable font family found')
+        self._fontFamily = family
+
+        GdipSetStringFormatLineAlign(self._textFormat, 0)   # top
+
+        self._font = ct.c_void_p()
+        GdipCreateFont(family, self.fontPx, 0, UNIT_PIXEL, ct.byref(self._font))
+
+        self._textBrush = ct.c_void_p()
+        GdipCreateSolidFill(INPUT_TEXT_ARGB, ct.byref(self._textBrush))
+
+        self._textFormat = ct.c_void_p()
+        GdipCreateStringFormat(0, 0, ct.byref(self._textFormat))
+        GdipSetStringFormatFlags(self._textFormat, STRING_FORMAT_FLAGS)
+        GdipSetStringFormatLineAlign(self._textFormat, 1)   # center vertically
+
+    def _inputRect(self):
+        """Input box in window coords, or None when not in SCROLL mode."""
+        if not self.isScrolling or self.currentSprite is None:
+            return None
+        w, h = self._spriteSize(self.currentSprite)
+        l, t, r, b = INPUT_BOX
+        return (self.mascotX + int(l * w), self.mascotY + int(t * h),
+                self.mascotX + int(r * w), self.mascotY + int(b * h))
+
+    def _inInput(self, x, y):
+        rect = self._inputRect()
+        return rect is not None and rect[0] <= x < rect[2] and rect[1] <= y < rect[3]
+
+    def _measureText(self, graphics, text):
+        """Returns (width, height) of text on a single line."""
+        layout = RectF(0, 0, 100000, 100000)
+        box = RectF()
+        GdipMeasureString(graphics, text, -1, self._font, ct.byref(layout),
+                          self._textFormat, ct.byref(box), None, None)
+        return box.width, box.height
+
+    def _wrapLines(self, graphics, text, maxWidth):
+        """Split text into lines no wider than maxWidth (always returns >= 1)."""
+        lines = []
+        current = ''
+        for token in re.findall(r'\s+|\S+', text):
+            if token.isspace():
+                current += token
+                continue
+            if current.strip() and self._measureText(graphics, current + token)[0] > maxWidth:
+                lines.append(current)
+                current = ''
+            if self._measureText(graphics, current + token)[0] <= maxWidth:
+                current += token
+                continue
+            # A single word wider than the box: break it by character.
+            for ch in token:
+                if current and self._measureText(graphics, current + ch)[0] > maxWidth:
+                    lines.append(current)
+                    current = ''
+                current += ch
+        lines.append(current)
+        return lines
+
+    def _drawInput(self, hdc):
+        """Draw the typed text (word-wrapped) and caret inside the input box."""
+        rect = self._inputRect()
+        if rect is None or self._font is None:
+            return
+        left, top, right, bottom = rect
+        left += INPUT_PADDING
+        right -= INPUT_PADDING
+        top += INPUT_PADDING
+        bottom -= INPUT_PADDING
+        width = right - left
+        height = bottom - top
+
+        graphics = ct.c_void_p()
+        GdipCreateFromHDC(hdc, ct.byref(graphics))
+        try:
+            GdipSetTextRenderingHint(graphics, TEXT_RENDERING_ANTIALIAS)
+            GdipSetClipRectI(graphics, left, top, width, height, COMBINE_REPLACE)
+
+            caretW = max(2, int(self.fontPx * 0.07))
+            lineH = self._measureText(graphics, 'Ag')[1]
+            lines = self._wrapLines(graphics, self.inputText, width - caretW)
+
+            # If there are more lines than fit, scroll so the last one shows.
+            y0 = top + min(0.0, height - len(lines) * lineH)
+
+            for i, line in enumerate(lines):
+                y = y0 + i * lineH
+                if line and y + lineH >= top and y <= bottom:
+                    layout = RectF(left, y, width * 2, lineH)
+                    GdipDrawString(graphics, line, -1, self._font, ct.byref(layout),
+                                   self._textFormat, self._textBrush)
+
+            if self.caretOn:
+                lastW = self._measureText(graphics, lines[-1])[0] if lines[-1] else 0.0
+                caretH = int(lineH * 0.85)
+                caretY = y0 + (len(lines) - 1) * lineH + (lineH - caretH) / 2
+                GdipFillRectangleI(graphics, self._textBrush, int(left + lastW),
+                                   int(caretY), caretW, caretH)
+        finally:
+            GdipDeleteGraphics(graphics)
+
+    def _onChar(self, code):
+        if self._inputRect() is None:
+            return
+        if code == 0x0D:                      # Enter
+            self._submit()
+            return
+        if code == 0x08:                      # Backspace
+            self.inputText = self.inputText[:-1]
+        elif code >= 0x20 and code != 0x7F:
+            # Characters outside the BMP arrive as two WM_CHARs (surrogates).
+            if 0xD800 <= code <= 0xDBFF:
+                self._pendingHigh = code
+                return
+            if 0xDC00 <= code <= 0xDFFF:
+                if self._pendingHigh is None:
+                    return
+                code = 0x10000 + ((self._pendingHigh - 0xD800) << 10) + (code - 0xDC00)
+                self._pendingHigh = None
+            self.inputText += chr(code)
+        else:
+            return
+        self.caretOn = True
+        self._present()
+
+    def _submit(self):
+        text = self.inputText
+        self.inputText = ''
+        self.caretOn = True
+        self._present()
+        if text.strip() and self.onSubmit is not None:
+            self.onSubmit(text)
+        
+        self.isScrolling = False
+        self.mascot.setState(self.previousState)
+        self._setSprite(self.mascot.getNextImage())
+        self._present()
 
     # ------------------------------------------------------------ composition
     def _moveMascot(self, x, y):
@@ -586,10 +762,12 @@ class MascotDisplay(object):
 
     def _present(self):
         """Render the current frame into the alpha surface and compose it."""
-        # Clear to transparent; the sprite supplies every visible pixel, so its
-        # soft edges blend against nothing and no background color can bleed in.
+        # Clear to transparent, draw everything into the surface, THEN hand the
+        # finished surface to Windows. Anything drawn after UpdateLayeredWindow
+        # would never reach the screen.
         ct.memset(self.surfaceBits, 0, self.surfaceWidth * self.surfaceHeight * 4)
         self._drawSprite(self.surfaceDC, self.currentSprite, self.mascotX, self.mascotY)
+        self._drawInput(self.surfaceDC)
         GdiFlush()  # make sure every batched GDI call landed in the DIB
 
         size = SIZE(self.surfaceWidth, self.surfaceHeight)
@@ -601,12 +779,14 @@ class MascotDisplay(object):
     def _onClick(self):
         """Called on a click that wasn't a drag."""
         self.isScrolling = not self.isScrolling
+        log('scrolling =', self.isScrolling)
 
         if self.isScrolling:
             self.previousState = self.mascot.getState()
             self.mascot.setState(Mascot.SCROLL)
         else:
             self.mascot.setState(self.previousState)
+            self.inputText = ''
 
         self._setSprite(self.mascot.getNextImage())
         self._present()
@@ -618,12 +798,13 @@ class MascotDisplay(object):
             # re-compose the layered surface (this also advances the frame).
             ps = PAINTSTRUCT()
             BeginPaint(hwnd, ct.byref(ps))
-            self.currentSprite = self.mascot.getNextImage()
+            self._setSprite(self.mascot.getNextImage())
             self._present()
             EndPaint(hwnd, ct.byref(ps))
             return 0
         elif message == WM_LBUTTONDOWN:
             # Per-pixel alpha means this only fires over the mascot itself.
+            SetForegroundWindow(hwnd)       # make sure typing reaches us
             SetCapture(hwnd)
             self.dragging = True
             self.dragMoved = False
@@ -649,11 +830,22 @@ class MascotDisplay(object):
                 wasClick = not self.dragMoved
                 self.dragging = False
                 ReleaseCapture()
-                if wasClick:
+                # A click inside the text box just focuses it; it doesn't
+                # toggle SCROLL mode.
+                if wasClick and not self._inInput(GET_X_LPARAM(lParam),
+                                                  GET_Y_LPARAM(lParam)):
                     self._onClick()
             return 0
         elif message == WM_CAPTURECHANGED:
             self.dragging = False
+            return 0
+        elif message == WM_CHAR:
+            self._onChar(wParam)
+            return 0
+        elif message == WM_TIMER and wParam == CARET_TIMER_ID:
+            self.caretOn = not self.caretOn
+            if self._inputRect() is not None:
+                self._present()
             return 0
         elif message == WM_DESTROY or (message == WM_KEYDOWN and wParam == VK_ESCAPE):
             PostQuitMessage(0)
@@ -661,8 +853,12 @@ class MascotDisplay(object):
 
         return DefWindowProc(hwnd, message, wParam, lParam)
 
+def handleSubmit(text):
+    print('submitted:', text)
+
 def main():
-    return MascotDisplay().run()
+    return MascotDisplay(onSubmit=handleSubmit).run()
 
 if __name__ == '__main__':
+    print('display.py loaded from', os.path.abspath(__file__))
     sys.exit(main())
