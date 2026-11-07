@@ -1,8 +1,8 @@
+import ctypes
 import os
 import random
 import re
 import sys
-import ctypes
 from PyQt6.QtCore import QPoint, QRect, QRectF, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QColor,
@@ -10,6 +10,7 @@ from PyQt6.QtGui import (
     QFontMetrics,
     QMouseEvent,
     QPainter,
+    QPainterPath,
     QPen,
     QPixmap,
 )
@@ -27,10 +28,10 @@ def log(*args):
 
 # ------------------------------- Tweaks ----------------------------------
 user32 = ctypes.windll.user32
-SCREEN_WITDH = user32.GetSystemMetrics(0)
+SCREEN_WIDTH = user32.GetSystemMetrics(0)
 SCREEN_HEIGHT = user32.GetSystemMetrics(1)
 
-MASCOT_SCALE = (SCREEN_WITDH / 1067) * 0.15
+MASCOT_SCALE = (SCREEN_WIDTH / 1067) * 0.15
 INPUT_BOX = (0.272, 0.020, 0.776, 0.800)  # (left, top, right, bottom) fractions
 INPUT_PADDING = 14  # screen px padding inside input area
 INPUT_FONT_PX = 70  # natural px, scaled by MASCOT_SCALE
@@ -38,22 +39,26 @@ INPUT_TEXT_COLOR = QColor(0x13, 0x13, 0x13)
 CARET_BLINK_MS = 530
 
 # Wandering
-WANDER_INTERVAL_MS = 33          # ~30 ticks/sec
-WANDER_TURN_TICKS = (60, 90)     # re-pick direction every 2-3 seconds
-WANDER_VX_CHOICES = (-2, -1, 0, 1, 2)   # px per tick
-WANDER_VY_CHOICES = (0, )          # use (0,) to keep it on a horizontal line
-DRAG_COOLDOWN_TICKS = 90         # pause wandering ~3s after you drop it
+WANDER_INTERVAL_MS = 33  # ~30 ticks/sec
+WANDER_TURN_TICKS = (60, 90)  # re-pick direction every 2-3 seconds
+WANDER_VX_CHOICES = (-2, -1, 0, 1, 2)  # px per tick
+WANDER_VY_CHOICES = (0,)  # horizontal roaming line
+DRAG_COOLDOWN_TICKS = 90  # pause wandering ~3s after drop
+
+# UI Dimensions
+POKE_BTN_W = 115
+POKE_BTN_H = 30
+SPEECH_DISMISS_MS = 8000  # Hide bubble after 8 seconds
 
 
 class MascotDisplay(QWidget):
-  """Fullscreen transparent, stay-on-top window displaying an interactive mascot.
+  """Fullscreen transparent, stay-on-top window displaying an interactive mascot."""
 
-  Preserves the exact API:
-      MascotDisplay(scale=..., title=..., onSubmit=...).run()
-  """
-
-  # Signal allowing background worker threads (like pipeline.py) to push speech and mood
   ai_response_signal = pyqtSignal(str, str)
+
+  def isInputActive(self) -> bool:
+    """Returns True if the mascot is currently in SCROLL mode (typing input open)."""
+    return bool(self.isScrolling)
 
   def __init__(
       self,
@@ -61,9 +66,9 @@ class MascotDisplay(QWidget):
       title: str = "Python Window",
       className: str = "MainWin",
       onSubmit=None,
+      onPoke=None,
       sprite_folder: str = None,
   ):
-    # Ensure a QApplication instance exists before widget creation
     self._app = QApplication.instance()
     self._owns_app = False
     if self._app is None:
@@ -74,6 +79,7 @@ class MascotDisplay(QWidget):
     self.setWindowTitle(title)
     self.scale = scale
     self.onSubmit = onSubmit
+    self.onPoke = onPoke  # Callback to force Gemini speech
 
     # 1. Native Window Configuration
     self.setWindowFlags(
@@ -86,15 +92,17 @@ class MascotDisplay(QWidget):
 
     # 2. State & Mascot setup
     self.mascot = (
-        Mascot(base_sprite_dir=sprite_folder)
-        if sprite_folder
-        else Mascot()
+        Mascot(base_sprite_dir=sprite_folder) if sprite_folder else Mascot()
     )
     self.currentSprite = None
-    self.spriteCache = {}  # path -> QPixmap
+    self.spriteCache = {}
 
     self.previousState = self.mascot.getState()
     self.isScrolling = False
+
+    def isInputActive(self) -> bool:
+        """Returns True if the mascot is currently in SCROLL mode (typing input open)."""
+        return bool(self.isScrolling)
 
     # Mascot coordinates inside window
     self.mascotX = 0
@@ -123,8 +131,9 @@ class MascotDisplay(QWidget):
     self.font = QFont("Segoe UI", pointSize=-1)
     self.font.setPixelSize(self.fontPx)
 
-    # Bubble text buffer (for incoming AI dialogue)
+    # Bubble text buffer & display font
     self.bubbleText = ""
+    self.bubbleFont = QFont("Segoe UI", 10, QFont.Weight.Medium)
 
     # Connect background thread signal
     self.ai_response_signal.connect(self.setSpeech)
@@ -135,14 +144,17 @@ class MascotDisplay(QWidget):
     self.caretTimer.timeout.connect(self._onCaretTick)
     self.caretTimer.start()
 
-    # Wander Timer (started in run(), once there is a sprite to move)
+    # Speech Bubble Auto-Dismiss Timer
+    self.speechTimer = QTimer(self)
+    self.speechTimer.setSingleShot(True)
+    self.speechTimer.timeout.connect(self._dismissSpeech)
+
+    # Wander Timer
     self.wanderTimer = QTimer(self)
     self.wanderTimer.setInterval(WANDER_INTERVAL_MS)
     self.wanderTimer.timeout.connect(self._updateWander)
-
   # ------------------------------------------------------------- Lifecycle
   def run(self) -> int:
-    """Sizes window to primary screen, initializes sprite, shows window, and runs loop."""
     screen_geo = QApplication.primaryScreen().geometry()
     self.setGeometry(screen_geo)
 
@@ -154,8 +166,9 @@ class MascotDisplay(QWidget):
     log("first sprite:", self.currentSprite)
 
     drawW, drawH = self._spriteSize(self.currentSprite)
+    bounds = self._wanderBounds()
     self.mascotX = (self.width() - drawW) // 2
-    self.mascotY = (self.height() - drawH)
+    self.mascotY = bounds.y() + bounds.height() - drawH
 
     self.show()
     self.raise_()
@@ -169,33 +182,45 @@ class MascotDisplay(QWidget):
   # ---------------------------------------------------------- AI Integration
   def setSpeech(self, text: str, reaction: str = ""):
     """Thread-safe handler to set mood and display AI speech text."""
-    self.bubbleText = text
+    self.bubbleText = text.strip()
     if reaction and hasattr(self.mascot, "setReaction"):
       self.mascot.setReaction(reaction)
     self._setSprite(self.mascot.getNextImage())
+
+    # Stop roaming briefly while speaking
+    self.dragCooldown = DRAG_COOLDOWN_TICKS * 2
+    self.vx = self.vy = 0
+
+    self.speechTimer.stop()
+    if self.bubbleText:
+      self.speechTimer.start(SPEECH_DISMISS_MS)
+
+    self.update()
+
+  def _dismissSpeech(self):
+    self.bubbleText = ""
     self.update()
 
   # --------------------------------------------------------------- Wandering
   def _wanderBounds(self) -> QRect:
-    """Walkable area in window coords (the primary screen minus taskbar/dock)."""
     screen = self.screen()
     avail = screen.availableGeometry()
     geo = screen.geometry()
-    return QRect(avail.x() - geo.x(), avail.y() - geo.y(),
-                 avail.width(), avail.height())
+    return QRect(
+        avail.x() - geo.x(),
+        avail.y() - geo.y(),
+        avail.width(),
+        avail.height(),
+    )
 
   def _updateWander(self):
-    """One tick of autonomous wandering; the mascot bounces off the screen edges."""
-    # Don't wander while the user is dragging, typing, or before the first sprite.
     if self.dragging or self.isScrolling or self.currentSprite is None:
       return
 
-    # Count down the pause after a drag.
     if self.dragCooldown > 0:
       self.dragCooldown -= 1
       return
 
-    # Every ~2-3 seconds pick a new velocity: walk left, walk right, or idle.
     self.stepCounter += 1
     if self.stepCounter > self.turnAt:
       self.stepCounter = 0
@@ -208,14 +233,14 @@ class MascotDisplay(QWidget):
 
     drawW, drawH = self._spriteSize(self.currentSprite)
     bounds = self._wanderBounds()
-    minX, minY = bounds.x(), bounds.y()
+    minX = bounds.x()
+    minY = bounds.y() + 100  # Leave room for floating speech bubble / poke button
     maxX = bounds.x() + bounds.width() - drawW
     maxY = bounds.y() + bounds.height() - drawH
 
     newX = self.mascotX + self.vx
     newY = self.mascotY + self.vy
 
-    # Bounce back when hitting the edges.
     if newX <= minX:
       newX = minX
       self.vx = abs(self.vx)
@@ -230,10 +255,11 @@ class MascotDisplay(QWidget):
       newY = maxY
       self.vy = -abs(self.vy)
 
-    oldRect = QRect(self.mascotX, self.mascotY, drawW, drawH)
+    # Full repaint dirty rect including floating overlays
+    old_dirty = self._activeMascotBounds()
     if self._moveMascot(newX, newY):
-      # The window is fullscreen, so only repaint the area that changed.
-      self.update(oldRect.united(QRect(self.mascotX, self.mascotY, drawW, drawH)))
+      new_dirty = self._activeMascotBounds()
+      self.update(old_dirty.united(new_dirty))
 
   # ------------------------------------------------------------- Sprites
   def _loadSprite(self, path: str) -> QPixmap:
@@ -242,7 +268,6 @@ class MascotDisplay(QWidget):
       if not os.path.exists(path):
         raise FileNotFoundError(f"Sprite not found: '{path}'")
       raw_pix = QPixmap(path)
-      # Pre-scale pixmap with smooth bicubic bilinear filter for efficiency
       target_w = max(1, int(raw_pix.width() * self.scale))
       target_h = max(1, int(raw_pix.height() * self.scale))
       pix = raw_pix.scaled(
@@ -259,14 +284,11 @@ class MascotDisplay(QWidget):
     return pix.width(), pix.height()
 
   def _setSprite(self, path: str):
-    """Swap current sprite, anchoring the center coordinate on screen."""
     if not path:
-      log(f"getNextImage() returned {path!r}; keeping current sprite")
       return
     path = str(path)
     if path == self.currentSprite:
       return
-    log("sprite ->", path)
 
     if self.currentSprite is None:
       self.currentSprite = path
@@ -281,10 +303,16 @@ class MascotDisplay(QWidget):
     self._moveMascot(cx - newW // 2, cy - newH // 2)
 
   def _moveMascot(self, x: int, y: int) -> bool:
-    """Clamp mascot sprite within screen bounds."""
     drawW, drawH = self._spriteSize(self.currentSprite)
-    clamped_x = min(max(x, 0), max(0, self.width() - drawW))
-    clamped_y = min(max(y, 0), max(0, self.height() - drawH))
+    bounds = self._wanderBounds()
+
+    clamped_x = min(
+        max(x, bounds.x()), max(bounds.x(), bounds.x() + bounds.width() - drawW)
+    )
+    clamped_y = min(
+        max(y, bounds.y() + 80),
+        max(bounds.y() + 80, bounds.y() + bounds.height() - drawH),
+    )
 
     if (clamped_x, clamped_y) == (self.mascotX, self.mascotY):
       return False
@@ -292,7 +320,7 @@ class MascotDisplay(QWidget):
     self.mascotX, self.mascotY = clamped_x, clamped_y
     return True
 
-  # ------------------------------------------------------------ Text Input
+  # ------------------------------------------------------------ Geometry Helpers
   def _inputRect(self) -> QRect | None:
     if not self.isScrolling or self.currentSprite is None:
       return None
@@ -309,23 +337,58 @@ class MascotDisplay(QWidget):
     rect = self._inputRect()
     return rect is not None and rect.contains(x, y)
 
+  def _pokeButtonRect(self) -> QRect:
+    drawW, _ = self._spriteSize(self.currentSprite)
+    btn_x = self.mascotX + (drawW - POKE_BTN_W) // 2
+    btn_y = self.mascotY - POKE_BTN_H - 10
+    return QRect(btn_x, btn_y, POKE_BTN_W, POKE_BTN_H)
+
+  def _inPokeButton(self, x: int, y: int) -> bool:
+    return self._pokeButtonRect().contains(x, y)
+
+  def _speechBubbleRect(self) -> QRect:
+    if not self.bubbleText:
+      return QRect()
+    metrics = QFontMetrics(self.bubbleFont)
+    max_bubble_w = 260
+    wrapped = self._wrapLines(self.bubbleText, max_bubble_w - 20)
+    bubble_w = min(
+        max_bubble_w, max([metrics.horizontalAdvance(line) for line in wrapped] + [120]) + 24
+    )
+    bubble_h = len(wrapped) * (metrics.height() + 2) + 20
+
+    drawW, _ = self._spriteSize(self.currentSprite)
+    bx = self.mascotX + (drawW - bubble_w) // 2
+    by = self.mascotY - POKE_BTN_H - bubble_h - 18
+    return QRect(bx, by, bubble_w, bubble_h)
+
+  def _activeMascotBounds(self) -> QRect:
+    """Calculates entire bounding box covering sprite + button + speech bubble."""
+    w, h = self._spriteSize(self.currentSprite)
+    base = QRect(self.mascotX, self.mascotY, w, h)
+    base = base.united(self._pokeButtonRect())
+    if self.bubbleText:
+      base = base.united(self._speechBubbleRect())
+    return base.adjusted(-10, -10, 10, 10)
+
+  # ------------------------------------------------------------ Text & Caret
   def _wrapLines(self, text: str, maxWidth: int) -> list[str]:
-    """Word-wraps input text and splits oversized continuous tokens."""
     metrics = QFontMetrics(self.font)
     lines = []
     current = ""
-
     for token in re.findall(r"\s+|\S+", text):
       if token.isspace():
         current += token
         continue
-      if current.strip() and metrics.horizontalAdvance(current + token) > maxWidth:
+      if (
+          current.strip()
+          and metrics.horizontalAdvance(current + token) > maxWidth
+      ):
         lines.append(current)
         current = ""
       if metrics.horizontalAdvance(current + token) <= maxWidth:
         current += token
         continue
-      # Break individual long token by character
       for ch in token:
         if current and metrics.horizontalAdvance(current + ch) > maxWidth:
           lines.append(current)
@@ -350,10 +413,9 @@ class MascotDisplay(QWidget):
   def _onCaretTick(self):
     if self.isScrolling:
       self.caretOn = not self.caretOn
-      self.update()
+      self.update(self._inputRect() or self.rect())
 
   def _onClick(self):
-    """Toggles scroll mode on simple mouse clicks."""
     self.isScrolling = not self.isScrolling
     log("scrolling =", self.isScrolling)
 
@@ -373,12 +435,44 @@ class MascotDisplay(QWidget):
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
 
-    # 1. Draw Sprite
+    # 1. Draw Mascot Sprite
     if self.currentSprite:
       pix = self._loadSprite(self.currentSprite)
       painter.drawPixmap(self.mascotX, self.mascotY, pix)
 
-    # 2. Draw Typed Text & Caret (when SCROLL mode is active)
+    # 2. Draw 'Poke / Speak' Pill Button
+    btn_r = self._pokeButtonRect()
+    btn_path = QPainterPath()
+    btn_path.addRoundedRect(QRectF(btn_r), 15, 15)
+    painter.fillPath(btn_path, QColor(30, 33, 40, 230))
+    painter.setPen(QPen(QColor(99, 102, 241, 230), 1.5))
+    painter.drawPath(btn_path)
+
+    painter.setPen(QColor(245, 245, 245))
+    painter.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
+    painter.drawText(btn_r, Qt.AlignmentFlag.AlignCenter, "Poke / Speak 💬")
+
+    # 3. Draw AI Speech Bubble (if active)
+    if self.bubbleText:
+      sb_r = self._speechBubbleRect()
+      sb_path = QPainterPath()
+      sb_path.addRoundedRect(QRectF(sb_r), 12, 12)
+      painter.fillPath(sb_path, QColor(255, 255, 255, 245))
+      painter.setPen(QPen(QColor(30, 30, 30, 180), 1.5))
+      painter.drawPath(sb_path)
+
+      painter.setFont(self.bubbleFont)
+      painter.setPen(QColor(20, 20, 20))
+      metrics = QFontMetrics(self.bubbleFont)
+      lines = self._wrapLines(self.bubbleText, sb_r.width() - 20)
+      line_h = metrics.height() + 2
+      y_cur = sb_r.top() + 10 + metrics.ascent()
+
+      for line in lines:
+        painter.drawText(sb_r.left() + 12, y_cur, line)
+        y_cur += line_h
+
+    # 4. Draw Typed Text & Caret (Scroll Input Mode)
     rect = self._inputRect()
     if rect is not None:
       box = rect.adjusted(
@@ -403,16 +497,12 @@ class MascotDisplay(QWidget):
           if line and y + lineH >= box.top() and y <= box.bottom():
             painter.drawText(box.left(), baseline, line)
 
-        # Draw Caret
         if self.caretOn:
           lastW = metrics.horizontalAdvance(lines[-1]) if lines[-1] else 0
           caretH = int(lineH * 0.85)
           caretY = y0 + (len(lines) - 1) * lineH + (lineH - caretH) // 2
           caretX = box.left() + lastW
-
-          painter.fillRect(
-              caretX, caretY, caretW, caretH, INPUT_TEXT_COLOR
-          )
+          painter.fillRect(caretX, caretY, caretW, caretH, INPUT_TEXT_COLOR)
 
         painter.restore()
 
@@ -420,10 +510,17 @@ class MascotDisplay(QWidget):
   def mousePressEvent(self, event: QMouseEvent):
     if event.button() == Qt.MouseButton.LeftButton:
       pos = event.position().toPoint()
+
+      # 1. Poke Button Click
+      if self._inPokeButton(pos.x(), pos.y()):
+        if self.onPoke:
+          self.onPoke()
+        event.accept()
+        return
+
+      # 2. Mascot Drag Initiation
       w, h = self._spriteSize(self.currentSprite)
       sprite_rect = QRect(self.mascotX, self.mascotY, w, h)
-
-      # Only capture mouse presses on the mascot itself
       if sprite_rect.contains(pos):
         self.dragging = True
         self.dragMoved = False
@@ -448,8 +545,10 @@ class MascotDisplay(QWidget):
           self.setCursor(Qt.CursorShape.SizeAllCursor)
 
       if self.dragMoved:
+        old_area = self._activeMascotBounds()
         if self._moveMascot(self.dragMascotX + dx, self.dragMascotY + dy):
-          self.update()
+          new_area = self._activeMascotBounds()
+          self.update(old_area.united(new_area))
       event.accept()
       return
 
@@ -462,13 +561,15 @@ class MascotDisplay(QWidget):
       self.unsetCursor()
 
       if not wasClick:
-        # Let go somewhere new: stand still for a moment before wandering again.
         self.dragCooldown = DRAG_COOLDOWN_TICKS
         self.vx = self.vy = 0
 
       pos = event.position().toPoint()
-      # Clicks outside the scroll box toggle scroll mode
-      if wasClick and not self._inInput(pos.x(), pos.y()):
+      if (
+          wasClick
+          and not self._inInput(pos.x(), pos.y())
+          and not self._inPokeButton(pos.x(), pos.y())
+      ):
         self._onClick()
 
       event.accept()
@@ -506,13 +607,13 @@ class MascotDisplay(QWidget):
 
     super().keyPressEvent(event)
 
+
 def handleSubmit(text):
   print("submitted:", text)
 
 
 def main():
   return MascotDisplay(onSubmit=handleSubmit).run()
-
 
 if __name__ == "__main__":
   print("display.py loaded from", os.path.abspath(__file__))
