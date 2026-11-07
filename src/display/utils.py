@@ -10,7 +10,7 @@ class ImagePathIterator:
         return self
     
     def __next__(self):
-        path = os.path.join(self.path, f"frame_{self.currentFrame}")
+        path = os.path.join(self.path, f"frame_{self.currentFrame}.png")
 
         self.currentFrame = (self.currentFrame + 1) % self.maxFrame
         

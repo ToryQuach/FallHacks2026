@@ -1,7 +1,6 @@
 from __future__ import unicode_literals
 
 import sys
-import os
 import ctypes as ct
 
 from mascot import Mascot
@@ -48,6 +47,39 @@ class RECT(ct.Structure):
                 ('top', LONG),
                 ('right', LONG),
                 ('bottom', LONG))
+
+class SIZE(ct.Structure):
+    _fields_ = (('cx', LONG),
+                ('cy', LONG))
+
+class BITMAPINFOHEADER(ct.Structure):
+    _fields_ = (('biSize', DWORD),
+                ('biWidth', LONG),
+                ('biHeight', LONG),
+                ('biPlanes', WORD),
+                ('biBitCount', WORD),
+                ('biCompression', DWORD),
+                ('biSizeImage', DWORD),
+                ('biXPelsPerMeter', LONG),
+                ('biYPelsPerMeter', LONG),
+                ('biClrUsed', DWORD),
+                ('biClrImportant', DWORD))
+
+class RGBQUAD(ct.Structure):
+    _fields_ = (('rgbBlue', BYTE),
+                ('rgbGreen', BYTE),
+                ('rgbRed', BYTE),
+                ('rgbReserved', BYTE))
+
+class BITMAPINFO(ct.Structure):
+    _fields_ = (('bmiHeader', BITMAPINFOHEADER),
+                ('bmiColors', RGBQUAD * 1))
+
+class BLENDFUNCTION(ct.Structure):
+    _fields_ = (('BlendOp', BYTE),
+                ('BlendFlags', BYTE),
+                ('SourceConstantAlpha', BYTE),
+                ('AlphaFormat', BYTE))
 
 class MSG(ct.Structure):
     _fields_ = (('hwnd', HWND),
@@ -151,10 +183,10 @@ SetForegroundWindow.restype = BOOL
 SetProcessDPIAware = user32.SetProcessDPIAware
 SetProcessDPIAware.argtypes = ()
 SetProcessDPIAware.restype = BOOL
-SetLayeredWindowAttributes = user32.SetLayeredWindowAttributes
-SetLayeredWindowAttributes.argtypes = HWND, DWORD, BYTE, DWORD
-SetLayeredWindowAttributes.restype = BOOL
-SetLayeredWindowAttributes.errcheck = errcheck
+UpdateLayeredWindow = user32.UpdateLayeredWindow
+UpdateLayeredWindow.argtypes = HWND, HDC, ct.POINTER(POINT), ct.POINTER(SIZE), HDC, ct.POINTER(POINT), DWORD, ct.POINTER(BLENDFUNCTION), DWORD
+UpdateLayeredWindow.restype = BOOL
+UpdateLayeredWindow.errcheck = errcheck
 EndPaint = user32.EndPaint
 EndPaint.argtypes = HWND, ct.POINTER(PAINTSTRUCT)
 EndPaint.restype = BOOL
@@ -169,13 +201,26 @@ gdi32 = ct.WinDLL('gdi32', use_last_error=True)
 GetStockObject = gdi32.GetStockObject
 GetStockObject.argtypes = ct.c_int,
 GetStockObject.restype = HGDIOBJ
-CreateSolidBrush = gdi32.CreateSolidBrush
-CreateSolidBrush.argtypes = DWORD,
-CreateSolidBrush.restype = HBRUSH
-CreateSolidBrush.errcheck = errcheck
+CreateDIBSection = gdi32.CreateDIBSection
+CreateDIBSection.argtypes = HDC, ct.POINTER(BITMAPINFO), UINT, ct.POINTER(ct.c_void_p), HANDLE, DWORD
+CreateDIBSection.restype = HANDLE
+CreateDIBSection.errcheck = errcheck
+CreateCompatibleDC = gdi32.CreateCompatibleDC
+CreateCompatibleDC.argtypes = HDC,
+CreateCompatibleDC.restype = HDC
+CreateCompatibleDC.errcheck = errcheck
+SelectObject = gdi32.SelectObject
+SelectObject.argtypes = HDC, HGDIOBJ
+SelectObject.restype = HGDIOBJ
+DeleteDC = gdi32.DeleteDC
+DeleteDC.argtypes = HDC,
+DeleteDC.restype = BOOL
 DeleteObject = gdi32.DeleteObject
 DeleteObject.argtypes = HGDIOBJ,
 DeleteObject.restype = BOOL
+GdiFlush = gdi32.GdiFlush
+GdiFlush.argtypes = ()
+GdiFlush.restype = BOOL
 
 # GDI+ is used only to blit the mascot sprite (a PNG with an alpha channel).
 gdiplus = ct.WinDLL('gdiplus', use_last_error=True)
@@ -247,14 +292,15 @@ WS_POPUP = 0x80000000
 assert WS_POPUP == 0x80000000
 
 WS_EX_LAYERED = 0x00080000
-LWA_COLORKEY = 0x00000001
+ULW_ALPHA = 0x00000002
+AC_SRC_OVER = 0x00
+AC_SRC_ALPHA = 0x01
+
+BI_RGB = 0
+DIB_RGB_COLORS = 0
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
-
-# COLORREF is 0x00BBGGRR. Everything painted in this color becomes
-# transparent, so the window background is filled with it too.
-TRANSPARENT_COLOR = 0x00F91EFC
 
 CS_HREDRAW = 2
 CS_VREDRAW = 1
@@ -278,12 +324,12 @@ INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
 mascot = None
 spriteCache = {}  # PNG path -> GDI+ bitmap handle
 
-def nextMascotImage():
-    # getNextImage() hands back the sprite path without its file extension.
-    path = mascot.getNextImage()
-    if not os.path.splitext(path)[1]:
-        path += '.png'
-    return path
+# Per-pixel-alpha surface the layered window is composed from.
+surfaceBitmap = None
+surfaceDC = None
+surfaceBits = None
+surfaceWidth = 0
+surfaceHeight = 0
 
 def loadSprite(path):
     """Load a sprite PNG into a cached GDI+ bitmap (keeps its alpha channel)."""
@@ -316,8 +362,38 @@ def drawSprite(hdc, path, rect):
     GdipDrawImageRectI(graphics, bitmap, x, y, drawW, drawH)
     GdipDeleteGraphics(graphics)
 
+def createSurface(width, height):
+    """32-bit top-down DIB; zeroed pixels are fully transparent."""
+    bmi = BITMAPINFO()
+    bmi.bmiHeader.biSize = ct.sizeof(BITMAPINFOHEADER)
+    bmi.bmiHeader.biWidth = width
+    bmi.bmiHeader.biHeight = -height  # negative height = top-down rows
+    bmi.bmiHeader.biPlanes = 1
+    bmi.bmiHeader.biBitCount = 32
+    bmi.bmiHeader.biCompression = BI_RGB
+
+    bits = ct.c_void_p()
+    dib = CreateDIBSection(None, ct.byref(bmi), DIB_RGB_COLORS, ct.byref(bits), None, 0)
+    dc = CreateCompatibleDC(None)
+    SelectObject(dc, dib)
+    return dib, dc, bits
+
+def present(hwnd):
+    """Render the next frame into the alpha surface and compose it on screen."""
+    # Clear to transparent; the sprite supplies every visible pixel, so its
+    # soft edges blend against nothing and no background color can bleed in.
+    ct.memset(surfaceBits, 0, surfaceWidth * surfaceHeight * 4)
+    drawSprite(surfaceDC, mascot.getNextImage(), RECT(0, 0, surfaceWidth, surfaceHeight))
+    GdiFlush()  # make sure every batched GDI call landed in the DIB
+
+    size = SIZE(surfaceWidth, surfaceHeight)
+    src = POINT(0, 0)
+    blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+    UpdateLayeredWindow(hwnd, None, None, ct.byref(size), surfaceDC,
+                        ct.byref(src), 0, ct.byref(blend), ULW_ALPHA)
+
 def MainWin():
-    global mascot
+    global mascot, surfaceBitmap, surfaceDC, surfaceBits, surfaceWidth, surfaceHeight
 
     # Opt into per-monitor DPI so the text stays crisp on scaled displays.
     SetProcessDPIAware()
@@ -330,10 +406,8 @@ def MainWin():
     mascot = Mascot()
 
     # Define Window Class
-    # The background brush paints the color key itself, so the whole client
-    # area drops out and only the mascot remains visible.
-    backgroundBrush = CreateSolidBrush(TRANSPARENT_COLOR)
-
+    # The client area is never GDI-painted: the window is composed from the
+    # per-pixel-alpha surface instead, so no background brush is needed.
     wndclass = WNDCLASS()
     wndclass.style         = CS_HREDRAW | CS_VREDRAW
     wndclass.lpfnWndProc   = WNDPROC(WndProc)
@@ -342,14 +416,14 @@ def MainWin():
     wndclass.hInstance     = GetModuleHandle(None)
     wndclass.hIcon         = LoadIcon(None, IDI_APPLICATION)
     wndclass.hCursor       = LoadCursor(None, IDC_ARROW)
-    wndclass.hbrBackground = backgroundBrush
+    wndclass.hbrBackground = None
     wndclass.lpszMenuName  = None
     wndclass.lpszClassName = 'MainWin'
 
     # Register Window Class
     RegisterClass(ct.byref(wndclass))
 
-    # Create Window. WS_EX_LAYERED is required for SetLayeredWindowAttributes.
+    # Create Window. WS_EX_LAYERED is required for UpdateLayeredWindow.
     # WS_POPUP + screen-sized rect = borderless fullscreen. Swap WS_POPUP for
     # WS_OVERLAPPEDWINDOW (and the rect for CW_USEDEFAULT) for a normal window.
     screen_w = GetSystemMetrics(SM_CXSCREEN)
@@ -368,12 +442,14 @@ def MainWin():
                           wndclass.hInstance,
                           None)
 
-    # Make every pixel painted in TRANSPARENT_COLOR transparent (color key).
-    SetLayeredWindowAttributes(hwnd, TRANSPARENT_COLOR, 0, LWA_COLORKEY)
+    # Compose from a per-pixel-alpha surface: transparent where there is no
+    # art, so edges stay clean instead of picking up a background color.
+    surfaceBitmap, surfaceDC, surfaceBits = createSurface(screen_w, screen_h)
+    surfaceWidth, surfaceHeight = screen_w, screen_h
+    present(hwnd)
 
     # Show Window
     user32.ShowWindow(hwnd, SW_SHOWNORMAL)
-    user32.UpdateWindow(hwnd)
     # Borderless windows don't always take focus on their own; needed for Esc.
     SetForegroundWindow(hwnd)
 
@@ -387,18 +463,19 @@ def MainWin():
         GdipDisposeImage(bitmap)
     spriteCache.clear()
     GdiplusShutdown(gdiplusToken)
-    DeleteObject(backgroundBrush)
+    DeleteDC(surfaceDC)
+    DeleteObject(surfaceBitmap)
 
     return msg.wParam
 
 def WndProc(hwnd, message, wParam, lParam):
     ps = PAINTSTRUCT()
-    rect = RECT()
 
     if message == WM_PAINT:
-        hdc = BeginPaint(hwnd, ct.byref(ps))
-        GetClientRect(hwnd, ct.byref(rect))
-        drawSprite(hdc, nextMascotImage(), rect)
+        # The window has no GDI content; validate the update region and
+        # re-compose the layered surface (this also advances the frame).
+        BeginPaint(hwnd, ct.byref(ps))
+        present(hwnd)
         EndPaint(hwnd, ct.byref(ps))
         return 0
     elif message == WM_KEYDOWN and wParam == VK_ESCAPE:
