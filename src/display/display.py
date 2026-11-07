@@ -1,7 +1,10 @@
 from __future__ import unicode_literals
 
 import sys
+import os
 import ctypes as ct
+
+from mascot import Mascot
 
 # Generic Windows types built from plain ctypes primitives.
 BYTE = ct.c_ubyte
@@ -166,6 +169,65 @@ gdi32 = ct.WinDLL('gdi32', use_last_error=True)
 GetStockObject = gdi32.GetStockObject
 GetStockObject.argtypes = ct.c_int,
 GetStockObject.restype = HGDIOBJ
+CreateSolidBrush = gdi32.CreateSolidBrush
+CreateSolidBrush.argtypes = DWORD,
+CreateSolidBrush.restype = HBRUSH
+CreateSolidBrush.errcheck = errcheck
+DeleteObject = gdi32.DeleteObject
+DeleteObject.argtypes = HGDIOBJ,
+DeleteObject.restype = BOOL
+
+# GDI+ is used only to blit the mascot sprite (a PNG with an alpha channel).
+gdiplus = ct.WinDLL('gdiplus', use_last_error=True)
+
+class GdiplusStartupInput(ct.Structure):
+    _fields_ = (('GdiplusVersion', UINT),
+                ('DebugEventCallback', LPVOID),
+                ('SuppressBackgroundThread', BOOL),
+                ('SuppressExternalCodecs', BOOL))
+
+def gdipcheck(status, func, args):
+    # GDI+ returns its own Status codes, not Win32 error codes.
+    if status != 0:
+        raise RuntimeError('%s failed with GDI+ status %d' % (func.__name__, status))
+    return status
+
+GdiplusStartup = gdiplus.GdiplusStartup
+GdiplusStartup.argtypes = ct.POINTER(ct.c_void_p), ct.POINTER(GdiplusStartupInput), LPVOID
+GdiplusStartup.restype = ct.c_int
+GdiplusStartup.errcheck = gdipcheck
+GdiplusShutdown = gdiplus.GdiplusShutdown
+GdiplusShutdown.argtypes = ct.c_void_p,
+GdiplusShutdown.restype = None
+GdipCreateBitmapFromFile = gdiplus.GdipCreateBitmapFromFile
+GdipCreateBitmapFromFile.argtypes = LPCWSTR, ct.POINTER(ct.c_void_p)
+GdipCreateBitmapFromFile.restype = ct.c_int
+GdipCreateBitmapFromFile.errcheck = gdipcheck
+GdipCreateFromHDC = gdiplus.GdipCreateFromHDC
+GdipCreateFromHDC.argtypes = HDC, ct.POINTER(ct.c_void_p)
+GdipCreateFromHDC.restype = ct.c_int
+GdipCreateFromHDC.errcheck = gdipcheck
+GdipGetImageWidth = gdiplus.GdipGetImageWidth
+GdipGetImageWidth.argtypes = ct.c_void_p, ct.POINTER(UINT)
+GdipGetImageWidth.restype = ct.c_int
+GdipGetImageWidth.errcheck = gdipcheck
+GdipGetImageHeight = gdiplus.GdipGetImageHeight
+GdipGetImageHeight.argtypes = ct.c_void_p, ct.POINTER(UINT)
+GdipGetImageHeight.restype = ct.c_int
+GdipGetImageHeight.errcheck = gdipcheck
+GdipSetInterpolationMode = gdiplus.GdipSetInterpolationMode
+GdipSetInterpolationMode.argtypes = ct.c_void_p, ct.c_int
+GdipSetInterpolationMode.restype = ct.c_int
+GdipDrawImageRectI = gdiplus.GdipDrawImageRectI
+GdipDrawImageRectI.argtypes = ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_int, ct.c_int, ct.c_int
+GdipDrawImageRectI.restype = ct.c_int
+GdipDrawImageRectI.errcheck = gdipcheck
+GdipDeleteGraphics = gdiplus.GdipDeleteGraphics
+GdipDeleteGraphics.argtypes = ct.c_void_p,
+GdipDeleteGraphics.restype = ct.c_int
+GdipDisposeImage = gdiplus.GdipDisposeImage
+GdipDisposeImage.argtypes = ct.c_void_p,
+GdipDisposeImage.restype = ct.c_int
 
 CW_USEDEFAULT = ct.c_int(0x80000000).value
 IDI_APPLICATION = MAKEINTRESOURCE(32512)
@@ -190,14 +252,14 @@ LWA_COLORKEY = 0x00000001
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
 
-# COLORREF is 0x00BBGGRR, so white is 0x00FFFFFF.
-COLOR_WHITE = 0x00FFFFFF
+# COLORREF is 0x00BBGGRR. Everything painted in this color becomes
+# transparent, so the window background is filled with it too.
+TRANSPARENT_COLOR = 0x00F91EFC
 
 CS_HREDRAW = 2
 CS_VREDRAW = 1
 
 IDC_ARROW = MAKEINTRESOURCE(32512)
-WHITE_BRUSH = 0
 
 SW_SHOWNORMAL = 1
 
@@ -209,11 +271,69 @@ DT_SINGLELINE = 32
 DT_CENTER = 1
 DT_VCENTER = 4
 
+# Sprites are 1336x948 PNGs; draw them at this fraction of natural size.
+MASCOT_SCALE = 0.5
+INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
+
+mascot = None
+spriteCache = {}  # PNG path -> GDI+ bitmap handle
+
+def nextMascotImage():
+    # getNextImage() hands back the sprite path without its file extension.
+    path = mascot.getNextImage()
+    if not os.path.splitext(path)[1]:
+        path += '.png'
+    return path
+
+def loadSprite(path):
+    """Load a sprite PNG into a cached GDI+ bitmap (keeps its alpha channel)."""
+    bitmap = spriteCache.get(path)
+    if bitmap is not None:
+        return bitmap
+
+    bitmap = ct.c_void_p()
+    GdipCreateBitmapFromFile(path, ct.byref(bitmap))
+    spriteCache[path] = bitmap
+    return bitmap
+
+def drawSprite(hdc, path, rect):
+    """Draw one sprite centered in rect, scaled by MASCOT_SCALE."""
+    bitmap = loadSprite(path)
+
+    width = UINT()
+    height = UINT()
+    GdipGetImageWidth(bitmap, ct.byref(width))
+    GdipGetImageHeight(bitmap, ct.byref(height))
+
+    drawW = int(width.value * MASCOT_SCALE)
+    drawH = int(height.value * MASCOT_SCALE)
+    x = (rect.right - rect.left - drawW) // 2
+    y = (rect.bottom - rect.top - drawH) // 2
+
+    graphics = ct.c_void_p()
+    GdipCreateFromHDC(hdc, ct.byref(graphics))
+    GdipSetInterpolationMode(graphics, INTERPOLATION_HIGH_QUALITY_BICUBIC)
+    GdipDrawImageRectI(graphics, bitmap, x, y, drawW, drawH)
+    GdipDeleteGraphics(graphics)
+
 def MainWin():
+    global mascot
+
     # Opt into per-monitor DPI so the text stays crisp on scaled displays.
     SetProcessDPIAware()
 
+    # Start GDI+ and the mascot before the window needs to paint.
+    gdiplusToken = ct.c_void_p()
+    gdiplusStartup = GdiplusStartupInput()
+    gdiplusStartup.GdiplusVersion = 1
+    GdiplusStartup(ct.byref(gdiplusToken), ct.byref(gdiplusStartup), None)
+    mascot = Mascot()
+
     # Define Window Class
+    # The background brush paints the color key itself, so the whole client
+    # area drops out and only the mascot remains visible.
+    backgroundBrush = CreateSolidBrush(TRANSPARENT_COLOR)
+
     wndclass = WNDCLASS()
     wndclass.style         = CS_HREDRAW | CS_VREDRAW
     wndclass.lpfnWndProc   = WNDPROC(WndProc)
@@ -222,7 +342,7 @@ def MainWin():
     wndclass.hInstance     = GetModuleHandle(None)
     wndclass.hIcon         = LoadIcon(None, IDI_APPLICATION)
     wndclass.hCursor       = LoadCursor(None, IDC_ARROW)
-    wndclass.hbrBackground = GetStockObject(WHITE_BRUSH)
+    wndclass.hbrBackground = backgroundBrush
     wndclass.lpszMenuName  = None
     wndclass.lpszClassName = 'MainWin'
 
@@ -248,8 +368,8 @@ def MainWin():
                           wndclass.hInstance,
                           None)
 
-    # Make every white pixel transparent (color key), leaving the rest opaque.
-    SetLayeredWindowAttributes(hwnd, COLOR_WHITE, 0, LWA_COLORKEY)
+    # Make every pixel painted in TRANSPARENT_COLOR transparent (color key).
+    SetLayeredWindowAttributes(hwnd, TRANSPARENT_COLOR, 0, LWA_COLORKEY)
 
     # Show Window
     user32.ShowWindow(hwnd, SW_SHOWNORMAL)
@@ -263,6 +383,12 @@ def MainWin():
         TranslateMessage(ct.byref(msg))
         DispatchMessage(ct.byref(msg))
 
+    for bitmap in spriteCache.values():
+        GdipDisposeImage(bitmap)
+    spriteCache.clear()
+    GdiplusShutdown(gdiplusToken)
+    DeleteObject(backgroundBrush)
+
     return msg.wParam
 
 def WndProc(hwnd, message, wParam, lParam):
@@ -272,6 +398,7 @@ def WndProc(hwnd, message, wParam, lParam):
     if message == WM_PAINT:
         hdc = BeginPaint(hwnd, ct.byref(ps))
         GetClientRect(hwnd, ct.byref(rect))
+        drawSprite(hdc, nextMascotImage(), rect)
         EndPaint(hwnd, ct.byref(ps))
         return 0
     elif message == WM_KEYDOWN and wParam == VK_ESCAPE:

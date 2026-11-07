@@ -1,13 +1,15 @@
 from utils import ImagePathIterator
 import os
 
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
 class Mascot:
-    DEFAULT_SPRITE_PATH        = "./resources/sprites/default"
-    ANGER_SPRITE_PATH          = "./resources/sprites/anger"
-    ANNOYANCE_SPRITE_PATH      = "./resources/sprites/annoyance"
-    DISAPPOINTMENT_SPRITE_PATH = "./resources/sprites/disappointment"
-    EXCITEMENT_SPRITE_PATH     = "./resources/sprites/excitement"
-    HAPPINESS_SPRITE_PATH      = "./resources/sprites/happiness"
+    DEFAULT_SPRITE_PATH        = os.path.join(_HERE, "resources", "sprites", "default")
+    ANGER_SPRITE_PATH          = os.path.join(_HERE, "resources", "sprites", "anger")
+    ANNOYANCE_SPRITE_PATH      = os.path.join(_HERE, "resources", "sprites", "annoyance")
+    DISAPPOINTMENT_SPRITE_PATH = os.path.join(_HERE, "resources", "sprites", "disappointment")
+    EXCITEMENT_SPRITE_PATH     = os.path.join(_HERE, "resources", "sprites", "excitement")
+    HAPPINESS_SPRITE_PATH      = os.path.join(_HERE, "resources", "sprites", "happiness")
 
     DEFAULT        = 0
     ANGER          = 1
