@@ -1,4 +1,7 @@
-google.genai
+google-genai
 pydantic
-dotenv
-PIL
+python-dotenv
+pillow
+pynput
+pyautogui
+jeepney; sys_platform == "linux"
