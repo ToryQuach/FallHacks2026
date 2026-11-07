@@ -1,14 +1,17 @@
-import os
+import io
 import json
+import os
+import time
 from pathlib import Path
 from typing import List, Literal, Optional
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from google import genai
-from google.genai import types
+from google.genai import errors, types
+from PIL import Image, ImageGrab
+from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Step 1: Read GEMINI_API_KEY & Model Config from .env
+# Step 1: Configuration & Client Setup
 # ---------------------------------------------------------------------------
 load_dotenv()
 
@@ -16,14 +19,15 @@ api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY not found in .env file or environment.")
 
-# Default to Gemma 4 (falls back to gemma-4-31b-it or whatever you specify in .env)
+# gemini-3.5-flash-lite offers fast inference and high availability
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_MODEL = "gemini-3.8-flash"
 
 client = genai.Client(api_key=api_key)
 
 
 # ---------------------------------------------------------------------------
-# Schema Definition
+# Step 2: Schema Definition
 # ---------------------------------------------------------------------------
 class SidekickResponse(BaseModel):
     status_classification: Literal["FOCUSING", "STRUGGLING", "DISTRACTED", "CELEBRATING"] = Field(
@@ -46,7 +50,7 @@ class SidekickResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Build the Personality and Goal
+# Step 3: Persona and Goal
 # ---------------------------------------------------------------------------
 def load_text_or_default(filepath: str, default: str) -> str:
     path = Path(filepath)
@@ -85,8 +89,19 @@ Rules:
 """
 
 
+def get_optimized_image_bytes(image_path: str, max_dim: int = 1280) -> bytes:
+    """Downscales and compresses screenshots to keep network latency under 200ms."""
+    with Image.open(image_path) as img:
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=75, optimize=True)
+        return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
-# Step 3: Get the Response Using Current Method (Default: Gemma)
+# Step 4: Robust API Execution with Retries
 # ---------------------------------------------------------------------------
 def get_sidekick_response(
     image_path: str,
@@ -96,11 +111,11 @@ def get_sidekick_response(
     user_message: Optional[str] = None,
     model_name: str = DEFAULT_MODEL
 ) -> SidekickResponse:
-    # 1. Package the screenshot
-    image_bytes = Path(image_path).read_bytes()
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+    # 1. Compress screenshot
+    image_bytes = get_optimized_image_bytes(image_path)
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
 
-    # 2. Package telemetry & context
+    # 2. Package telemetry
     state_payload = {
         "timestamp": current_timestamp,
         "mouse_active": mouse_active,
@@ -113,19 +128,48 @@ def get_sidekick_response(
         "Evaluate the screenshot against session goals and respond via the schema."
     )
 
-    # 3. Call the API with structured output schema
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[prompt_text, image_part],
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            response_schema=SidekickResponse,
-            temperature=0.4,
-        ),
+    # 3. Fast generation config
+    # Set thinking_level to low/minimal to prevent 60-90s reasoning delays
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        response_mime_type="application/json",
+        response_schema=SidekickResponse,
+        temperature=0.3,
+        thinking_config=types.ThinkingConfig(thinking_level="low"),
     )
 
-    # Direct parsed object or string fallback parsing
+    # Try requested model, and fallback if 503 persists
+    models_to_try = [model_name]
+    if model_name != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
+
+    response = None
+    last_err = None
+
+    for target_model in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=[prompt_text, image_part],
+                    config=config,
+                )
+                break
+            except errors.ServerError as e:
+                last_err = e
+                # Pause 1.5 seconds for spike to clear before retry
+                time.sleep(1.5)
+            except Exception as e:
+                last_err = e
+                break
+
+        if response is not None:
+            break
+
+    if response is None:
+        raise RuntimeError(f"All model attempts failed with: {last_err}")
+
+    # Parse Pydantic object
     if hasattr(response, "parsed") and isinstance(response.parsed, SidekickResponse):
         return response.parsed
 
@@ -141,6 +185,12 @@ if __name__ == "__main__":
     # so it works no matter which folder you run the script from)
     screenshot_path = str(Path(__file__).resolve().parent.parent / "history" / "temp_screen.png")
 
+    # Capture live screen if not present
+    if not Path(screenshot_path).exists():
+        screenshot = ImageGrab.grab()
+        screenshot.save(screenshot_path)
+
+    start_time = time.time()
     result = get_sidekick_response(
         image_path=screenshot_path,
         mouse_active=False,
@@ -148,8 +198,9 @@ if __name__ == "__main__":
         memory_queue=["[14:25:00] User opened VS Code to work on the parser."],
         user_message="Why is this segfaulting?"
     )
+    elapsed = time.time() - start_time
 
-    print(f"Model used:     {DEFAULT_MODEL}")
+    print(f"\n[Finished in {elapsed:.2f}s]")
     print("Classification:", result.status_classification)
     print("Reaction:      ", result.reaction)
     print("Bubble Speech: ", result.bubble_speech)
