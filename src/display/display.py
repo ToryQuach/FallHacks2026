@@ -5,7 +5,7 @@ import ctypes as ct
 
 from mascot import Mascot
 
-# Generic Windows types built from plain ctypes primitives.
+# --------------------------------------------------------------- Win32 types
 BYTE = ct.c_ubyte
 WORD = ct.c_ushort
 DWORD = ct.c_ulong
@@ -28,16 +28,15 @@ HGDIOBJ = HANDLE
 LPVOID = ct.c_void_p
 LPCWSTR = ct.c_wchar_p
 
-# WPARAM is an unsigned pointer-sized type, LPARAM/LRESULT are signed.
+# WPARAM is unsigned and pointer-sized; LPARAM/LRESULT are signed.
 if ct.sizeof(ct.c_long) == ct.sizeof(ct.c_void_p):
-    WPARAM = ct.c_ulong
-    LPARAM = ct.c_long
-    LRESULT = ct.c_long
+    WPARAM, LPARAM, LRESULT = ct.c_ulong, ct.c_long, ct.c_long
 else:
-    WPARAM = ct.c_ulonglong
-    LPARAM = ct.c_longlong
-    LRESULT = ct.c_longlong
+    WPARAM, LPARAM, LRESULT = ct.c_ulonglong, ct.c_longlong, ct.c_longlong
 
+WNDPROC = ct.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
+
+# -------------------------------------------------------------------- structs
 class POINT(ct.Structure):
     _fields_ = (('x', LONG),
                 ('y', LONG))
@@ -89,21 +88,6 @@ class MSG(ct.Structure):
                 ('time', DWORD),
                 ('pt', POINT))
 
-def errcheck(result, func, args):
-    if result is None or result == 0:
-        raise ct.WinError(ct.get_last_error())
-    return result
-
-def minusonecheck(result, func, args):
-    if result == -1:
-        raise ct.WinError(ct.get_last_error())
-    return result
-
-WNDPROC = ct.WINFUNCTYPE(LRESULT, HWND, UINT, WPARAM, LPARAM)
-
-def MAKEINTRESOURCE(x):
-    return LPCWSTR(x)
-
 class WNDCLASS(ct.Structure):
     _fields_ = (('style', UINT),
                 ('lpfnWndProc', WNDPROC),
@@ -124,121 +108,22 @@ class PAINTSTRUCT(ct.Structure):
                 ('fIncUpdate', BOOL),
                 ('rgbReserved', BYTE * 32))
 
-kernel32 = ct.WinDLL('kernel32', use_last_error=True)
-GetModuleHandle = kernel32.GetModuleHandleW
-GetModuleHandle.argtypes = LPCWSTR,
-GetModuleHandle.restype = HMODULE
-GetModuleHandle.errcheck = errcheck
-
-user32 = ct.WinDLL('user32', use_last_error=True)
-CreateWindowEx = user32.CreateWindowExW
-CreateWindowEx.argtypes = DWORD, LPCWSTR, LPCWSTR, DWORD, ct.c_int, ct.c_int, ct.c_int, ct.c_int, HWND, HMENU, HINSTANCE, LPVOID
-CreateWindowEx.restype = HWND
-CreateWindowEx.errcheck = errcheck
-LoadIcon = user32.LoadIconW
-LoadIcon.argtypes = HINSTANCE, LPCWSTR
-LoadIcon.restype = HICON
-LoadIcon.errcheck = errcheck
-LoadCursor = user32.LoadCursorW
-LoadCursor.argtypes = HINSTANCE, LPCWSTR
-LoadCursor.restype = HCURSOR
-LoadCursor.errcheck = errcheck
-RegisterClass = user32.RegisterClassW
-RegisterClass.argtypes = ct.POINTER(WNDCLASS),
-RegisterClass.restype = ATOM
-RegisterClass.errcheck = errcheck
-ShowWindow = user32.ShowWindow
-ShowWindow.argtypes = HWND, ct.c_int
-ShowWindow.restype = BOOL
-UpdateWindow = user32.UpdateWindow
-UpdateWindow.argtypes = HWND,
-UpdateWindow.restype = BOOL
-UpdateWindow.errcheck = errcheck
-GetMessage = user32.GetMessageW
-GetMessage.argtypes = ct.POINTER(MSG), HWND, UINT, UINT
-GetMessage.restype = BOOL
-GetMessage.errcheck = minusonecheck
-TranslateMessage = user32.TranslateMessage
-TranslateMessage.argtypes = ct.POINTER(MSG),
-TranslateMessage.restype = BOOL
-DispatchMessage = user32.DispatchMessageW
-DispatchMessage.argtypes = ct.POINTER(MSG),
-DispatchMessage.restype = LRESULT
-BeginPaint = user32.BeginPaint
-BeginPaint.argtypes = HWND, ct.POINTER(PAINTSTRUCT)
-BeginPaint.restype = HDC
-GetClientRect = user32.GetClientRect
-GetClientRect.argtypes = HWND, ct.POINTER(RECT)
-GetClientRect.restype = BOOL
-GetClientRect.errcheck = errcheck
-DrawText = user32.DrawTextW
-DrawText.argtypes = HDC, LPCWSTR, ct.c_int, ct.POINTER(RECT), UINT
-DrawText.restype = ct.c_int
-GetSystemMetrics = user32.GetSystemMetrics
-GetSystemMetrics.argtypes = ct.c_int,
-GetSystemMetrics.restype = ct.c_int
-SetForegroundWindow = user32.SetForegroundWindow
-SetForegroundWindow.argtypes = HWND,
-SetForegroundWindow.restype = BOOL
-SetCapture = user32.SetCapture
-SetCapture.argtypes = HWND,
-SetCapture.restype = HWND
-ReleaseCapture = user32.ReleaseCapture
-ReleaseCapture.argtypes = ()
-ReleaseCapture.restype = BOOL
-SetCursor = user32.SetCursor
-SetCursor.argtypes = HCURSOR,
-SetCursor.restype = HCURSOR
-SetProcessDPIAware = user32.SetProcessDPIAware
-SetProcessDPIAware.argtypes = ()
-SetProcessDPIAware.restype = BOOL
-UpdateLayeredWindow = user32.UpdateLayeredWindow
-UpdateLayeredWindow.argtypes = HWND, HDC, ct.POINTER(POINT), ct.POINTER(SIZE), HDC, ct.POINTER(POINT), DWORD, ct.POINTER(BLENDFUNCTION), DWORD
-UpdateLayeredWindow.restype = BOOL
-UpdateLayeredWindow.errcheck = errcheck
-EndPaint = user32.EndPaint
-EndPaint.argtypes = HWND, ct.POINTER(PAINTSTRUCT)
-EndPaint.restype = BOOL
-PostQuitMessage = user32.PostQuitMessage
-PostQuitMessage.argtypes = ct.c_int,
-PostQuitMessage.restype = None
-DefWindowProc = user32.DefWindowProcW
-DefWindowProc.argtypes = HWND, UINT, WPARAM, LPARAM
-DefWindowProc.restype = LRESULT
-
-gdi32 = ct.WinDLL('gdi32', use_last_error=True)
-GetStockObject = gdi32.GetStockObject
-GetStockObject.argtypes = ct.c_int,
-GetStockObject.restype = HGDIOBJ
-CreateDIBSection = gdi32.CreateDIBSection
-CreateDIBSection.argtypes = HDC, ct.POINTER(BITMAPINFO), UINT, ct.POINTER(ct.c_void_p), HANDLE, DWORD
-CreateDIBSection.restype = HANDLE
-CreateDIBSection.errcheck = errcheck
-CreateCompatibleDC = gdi32.CreateCompatibleDC
-CreateCompatibleDC.argtypes = HDC,
-CreateCompatibleDC.restype = HDC
-CreateCompatibleDC.errcheck = errcheck
-SelectObject = gdi32.SelectObject
-SelectObject.argtypes = HDC, HGDIOBJ
-SelectObject.restype = HGDIOBJ
-DeleteDC = gdi32.DeleteDC
-DeleteDC.argtypes = HDC,
-DeleteDC.restype = BOOL
-DeleteObject = gdi32.DeleteObject
-DeleteObject.argtypes = HGDIOBJ,
-DeleteObject.restype = BOOL
-GdiFlush = gdi32.GdiFlush
-GdiFlush.argtypes = ()
-GdiFlush.restype = BOOL
-
-# GDI+ is used only to blit the mascot sprite (a PNG with an alpha channel).
-gdiplus = ct.WinDLL('gdiplus', use_last_error=True)
-
 class GdiplusStartupInput(ct.Structure):
     _fields_ = (('GdiplusVersion', UINT),
                 ('DebugEventCallback', LPVOID),
                 ('SuppressBackgroundThread', BOOL),
                 ('SuppressExternalCodecs', BOOL))
+
+# ------------------------------------------------------------ error handlers
+def errcheck(result, func, args):
+    if result is None or result == 0:
+        raise ct.WinError(ct.get_last_error())
+    return result
+
+def minusonecheck(result, func, args):
+    if result == -1:
+        raise ct.WinError(ct.get_last_error())
+    return result
 
 def gdipcheck(status, func, args):
     # GDI+ returns its own Status codes, not Win32 error codes.
@@ -246,62 +131,103 @@ def gdipcheck(status, func, args):
         raise RuntimeError('%s failed with GDI+ status %d' % (func.__name__, status))
     return status
 
-GdiplusStartup = gdiplus.GdiplusStartup
-GdiplusStartup.argtypes = ct.POINTER(ct.c_void_p), ct.POINTER(GdiplusStartupInput), LPVOID
-GdiplusStartup.restype = ct.c_int
-GdiplusStartup.errcheck = gdipcheck
-GdiplusShutdown = gdiplus.GdiplusShutdown
-GdiplusShutdown.argtypes = ct.c_void_p,
-GdiplusShutdown.restype = None
-GdipCreateBitmapFromFile = gdiplus.GdipCreateBitmapFromFile
-GdipCreateBitmapFromFile.argtypes = LPCWSTR, ct.POINTER(ct.c_void_p)
-GdipCreateBitmapFromFile.restype = ct.c_int
-GdipCreateBitmapFromFile.errcheck = gdipcheck
-GdipCreateFromHDC = gdiplus.GdipCreateFromHDC
-GdipCreateFromHDC.argtypes = HDC, ct.POINTER(ct.c_void_p)
-GdipCreateFromHDC.restype = ct.c_int
-GdipCreateFromHDC.errcheck = gdipcheck
-GdipGetImageWidth = gdiplus.GdipGetImageWidth
-GdipGetImageWidth.argtypes = ct.c_void_p, ct.POINTER(UINT)
-GdipGetImageWidth.restype = ct.c_int
-GdipGetImageWidth.errcheck = gdipcheck
-GdipGetImageHeight = gdiplus.GdipGetImageHeight
-GdipGetImageHeight.argtypes = ct.c_void_p, ct.POINTER(UINT)
-GdipGetImageHeight.restype = ct.c_int
-GdipGetImageHeight.errcheck = gdipcheck
-GdipSetInterpolationMode = gdiplus.GdipSetInterpolationMode
-GdipSetInterpolationMode.argtypes = ct.c_void_p, ct.c_int
-GdipSetInterpolationMode.restype = ct.c_int
-GdipDrawImageRectI = gdiplus.GdipDrawImageRectI
-GdipDrawImageRectI.argtypes = ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_int, ct.c_int, ct.c_int
-GdipDrawImageRectI.restype = ct.c_int
-GdipDrawImageRectI.errcheck = gdipcheck
-GdipDeleteGraphics = gdiplus.GdipDeleteGraphics
-GdipDeleteGraphics.argtypes = ct.c_void_p,
-GdipDeleteGraphics.restype = ct.c_int
-GdipDisposeImage = gdiplus.GdipDisposeImage
-GdipDisposeImage.argtypes = ct.c_void_p,
-GdipDisposeImage.restype = ct.c_int
+def MAKEINTRESOURCE(x):
+    return LPCWSTR(x)
 
-CW_USEDEFAULT = ct.c_int(0x80000000).value
+def GET_X_LPARAM(lParam):
+    return ct.c_short(lParam & 0xFFFF).value
+
+def GET_Y_LPARAM(lParam):
+    return ct.c_short((lParam >> 16) & 0xFFFF).value
+
+# ------------------------------------------------------------------ kernel32
+kernel32 = ct.WinDLL('kernel32', use_last_error=True)
+GetModuleHandle = kernel32.GetModuleHandleW
+GetModuleHandle.argtypes = LPCWSTR,
+GetModuleHandle.restype = HMODULE
+GetModuleHandle.errcheck = errcheck
+
+# -------------------------------------------------------------------- user32
+user32 = ct.WinDLL('user32', use_last_error=True)
+
+def bind(lib, name, argtypes, restype, check=None):
+    fn = getattr(lib, name)
+    fn.argtypes = argtypes
+    fn.restype = restype
+    if check is not None:
+        fn.errcheck = check
+    return fn
+
+CreateWindowEx = bind(user32, 'CreateWindowExW',
+                      (DWORD, LPCWSTR, LPCWSTR, DWORD, ct.c_int, ct.c_int,
+                       ct.c_int, ct.c_int, HWND, HMENU, HINSTANCE, LPVOID),
+                      HWND, errcheck)
+LoadIcon = bind(user32, 'LoadIconW', (HINSTANCE, LPCWSTR), HICON, errcheck)
+LoadCursor = bind(user32, 'LoadCursorW', (HINSTANCE, LPCWSTR), HCURSOR, errcheck)
+RegisterClass = bind(user32, 'RegisterClassW', (ct.POINTER(WNDCLASS),), ATOM, errcheck)
+ShowWindow = bind(user32, 'ShowWindow', (HWND, ct.c_int), BOOL)
+SetForegroundWindow = bind(user32, 'SetForegroundWindow', (HWND,), BOOL)
+SetCapture = bind(user32, 'SetCapture', (HWND,), HWND)
+ReleaseCapture = bind(user32, 'ReleaseCapture', (), BOOL)
+SetCursor = bind(user32, 'SetCursor', (HCURSOR,), HCURSOR)
+SetProcessDPIAware = bind(user32, 'SetProcessDPIAware', (), BOOL)
+GetSystemMetrics = bind(user32, 'GetSystemMetrics', (ct.c_int,), ct.c_int)
+GetMessage = bind(user32, 'GetMessageW', (ct.POINTER(MSG), HWND, UINT, UINT), BOOL, minusonecheck)
+TranslateMessage = bind(user32, 'TranslateMessage', (ct.POINTER(MSG),), BOOL)
+DispatchMessage = bind(user32, 'DispatchMessageW', (ct.POINTER(MSG),), LRESULT)
+DefWindowProc = bind(user32, 'DefWindowProcW', (HWND, UINT, WPARAM, LPARAM), LRESULT)
+PostQuitMessage = bind(user32, 'PostQuitMessage', (ct.c_int,), None)
+BeginPaint = bind(user32, 'BeginPaint', (HWND, ct.POINTER(PAINTSTRUCT)), HDC)
+EndPaint = bind(user32, 'EndPaint', (HWND, ct.POINTER(PAINTSTRUCT)), BOOL)
+UpdateLayeredWindow = bind(user32, 'UpdateLayeredWindow',
+                           (HWND, HDC, ct.POINTER(POINT), ct.POINTER(SIZE), HDC,
+                            ct.POINTER(POINT), DWORD, ct.POINTER(BLENDFUNCTION), DWORD),
+                           BOOL, errcheck)
+
+# --------------------------------------------------------------------- gdi32
+gdi32 = ct.WinDLL('gdi32', use_last_error=True)
+
+CreateDIBSection = bind(gdi32, 'CreateDIBSection',
+                        (HDC, ct.POINTER(BITMAPINFO), UINT, ct.POINTER(ct.c_void_p), HANDLE, DWORD),
+                        HANDLE, errcheck)
+CreateCompatibleDC = bind(gdi32, 'CreateCompatibleDC', (HDC,), HDC, errcheck)
+SelectObject = bind(gdi32, 'SelectObject', (HDC, HGDIOBJ), HGDIOBJ)
+DeleteDC = bind(gdi32, 'DeleteDC', (HDC,), BOOL)
+DeleteObject = bind(gdi32, 'DeleteObject', (HGDIOBJ,), BOOL)
+GdiFlush = bind(gdi32, 'GdiFlush', (), BOOL)
+
+# -------------------------------------------------------------------- gdiplus
+gdiplus = ct.WinDLL('gdiplus', use_last_error=True)
+
+GdiplusStartup = bind(gdiplus, 'GdiplusStartup',
+                      (ct.POINTER(ct.c_void_p), ct.POINTER(GdiplusStartupInput), LPVOID),
+                      ct.c_int, gdipcheck)
+GdiplusShutdown = bind(gdiplus, 'GdiplusShutdown', (ct.c_void_p,), None)
+GdipCreateBitmapFromFile = bind(gdiplus, 'GdipCreateBitmapFromFile',
+                                (LPCWSTR, ct.POINTER(ct.c_void_p)), ct.c_int, gdipcheck)
+GdipCreateFromHDC = bind(gdiplus, 'GdipCreateFromHDC',
+                         (HDC, ct.POINTER(ct.c_void_p)), ct.c_int, gdipcheck)
+GdipGetImageWidth = bind(gdiplus, 'GdipGetImageWidth',
+                         (ct.c_void_p, ct.POINTER(UINT)), ct.c_int, gdipcheck)
+GdipGetImageHeight = bind(gdiplus, 'GdipGetImageHeight',
+                          (ct.c_void_p, ct.POINTER(UINT)), ct.c_int, gdipcheck)
+GdipSetInterpolationMode = bind(gdiplus, 'GdipSetInterpolationMode',
+                                (ct.c_void_p, ct.c_int), ct.c_int)
+GdipDrawImageRectI = bind(gdiplus, 'GdipDrawImageRectI',
+                          (ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_int, ct.c_int, ct.c_int),
+                          ct.c_int, gdipcheck)
+GdipDeleteGraphics = bind(gdiplus, 'GdipDeleteGraphics', (ct.c_void_p,), ct.c_int)
+GdipDisposeImage = bind(gdiplus, 'GdipDisposeImage', (ct.c_void_p,), ct.c_int)
+
+# ------------------------------------------------------------------ constants
 IDI_APPLICATION = MAKEINTRESOURCE(32512)
+IDC_ARROW = MAKEINTRESOURCE(32512)
+IDC_SIZEALL = MAKEINTRESOURCE(32646)
 
-WS_OVERLAPPED  = 0x00000000
-WS_CAPTION     = 0x00C00000
-WS_SYSMENU     = 0x00080000
-WS_THICKFRAME  = 0x00040000
-WS_MINIMIZEBOX = 0x00020000
-WS_MAXIMIZEBOX = 0x00010000
-
-WS_OVERLAPPEDWINDOW = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX
-assert WS_OVERLAPPEDWINDOW == 0x00CF0000
-
-# Borderless window with no caption; used for fullscreen.
 WS_POPUP = 0x80000000
-assert WS_POPUP == 0x80000000
-
 WS_EX_LAYERED = 0x00080000
 WS_EX_TOPMOST = 0x00000008
+
 ULW_ALPHA = 0x00000002
 AC_SRC_OVER = 0x00
 AC_SRC_ALPHA = 0x01
@@ -315,259 +241,291 @@ SM_CYSCREEN = 1
 CS_HREDRAW = 2
 CS_VREDRAW = 1
 
-IDC_ARROW = MAKEINTRESOURCE(32512)
-IDC_SIZEALL = MAKEINTRESOURCE(32646)
-
 SW_SHOWNORMAL = 1
 
-WM_PAINT = 15
 WM_DESTROY = 2
+WM_PAINT = 15
 WM_KEYDOWN = 0x0100
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_CAPTURECHANGED = 0x0215
 VK_ESCAPE = 0x1B
-DT_SINGLELINE = 32
-DT_CENTER = 1
-DT_VCENTER = 4
+
+ERROR_CLASS_ALREADY_EXISTS = 1410
 
 # ------------------------------- tweaks ----------------------------------
-# Sprites are 1336x948 PNGs; draw them at this fraction of natural size.
+# Sprites are 1336x948 PNGs; the default draws them at this fraction of
+# natural size. Pass MascotDisplay(scale=...) to override:
 # 0.25 = small, 0.5 = half size, 1.0 = full size.
 MASCOT_SCALE = 0.35
 # -------------------------------------------------------------------------
 INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
 
-mascot = None
-currentSprite = None  # sprite path currently on screen
-spriteCache = {}      # PNG path -> GDI+ bitmap handle
+# Window handle -> MascotDisplay, so the shared WNDPROC can find its instance.
+_instances = {}
 
-# Where the sprite sits in window coordinates.
-mascotX = 0
-mascotY = 0
-
-# Drag state, in window coordinates.
-dragging = False
-dragStartX = 0
-dragStartY = 0
-dragMascotX = 0
-dragMascotY = 0
-
-# Per-pixel-alpha surface the layered window is composed from.
-surfaceBitmap = None
-surfaceDC = None
-surfaceBits = None
-surfaceWidth = 0
-surfaceHeight = 0
-
-def loadSprite(path):
-    """Load a sprite PNG into a cached GDI+ bitmap (keeps its alpha channel)."""
-    bitmap = spriteCache.get(path)
-    if bitmap is not None:
-        return bitmap
-
-    bitmap = ct.c_void_p()
-    GdipCreateBitmapFromFile(path, ct.byref(bitmap))
-    spriteCache[path] = bitmap
-    return bitmap
-
-def GET_X_LPARAM(lParam):
-    return ct.c_short(lParam & 0xFFFF).value
-
-def GET_Y_LPARAM(lParam):
-    return ct.c_short((lParam >> 16) & 0xFFFF).value
-
-def mascotSize(path):
-    """On-screen size of one sprite after MASCOT_SCALE."""
-    bitmap = loadSprite(path)
-    width = UINT()
-    height = UINT()
-    GdipGetImageWidth(bitmap, ct.byref(width))
-    GdipGetImageHeight(bitmap, ct.byref(height))
-    return int(width.value * MASCOT_SCALE), int(height.value * MASCOT_SCALE)
-
-def drawSprite(hdc, path, x, y):
-    """Draw one sprite at (x, y), scaled by MASCOT_SCALE."""
-    bitmap = loadSprite(path)
-    drawW, drawH = mascotSize(path)
-
-    graphics = ct.c_void_p()
-    GdipCreateFromHDC(hdc, ct.byref(graphics))
-    GdipSetInterpolationMode(graphics, INTERPOLATION_HIGH_QUALITY_BICUBIC)
-    GdipDrawImageRectI(graphics, bitmap, x, y, drawW, drawH)
-    GdipDeleteGraphics(graphics)
-
-def createSurface(width, height):
-    """32-bit top-down DIB; zeroed pixels are fully transparent."""
-    bmi = BITMAPINFO()
-    bmi.bmiHeader.biSize = ct.sizeof(BITMAPINFOHEADER)
-    bmi.bmiHeader.biWidth = width
-    bmi.bmiHeader.biHeight = -height  # negative height = top-down rows
-    bmi.bmiHeader.biPlanes = 1
-    bmi.bmiHeader.biBitCount = 32
-    bmi.bmiHeader.biCompression = BI_RGB
-
-    bits = ct.c_void_p()
-    dib = CreateDIBSection(None, ct.byref(bmi), DIB_RGB_COLORS, ct.byref(bits), None, 0)
-    dc = CreateCompatibleDC(None)
-    SelectObject(dc, dib)
-    return dib, dc, bits
-
-def moveMascot(x, y):
-    """Move the sprite, keeping it fully on screen. Returns True if it moved."""
-    global mascotX, mascotY
-    drawW, drawH = mascotSize(currentSprite)
-    x = min(max(x, 0), max(0, surfaceWidth - drawW))
-    y = min(max(y, 0), max(0, surfaceHeight - drawH))
-    if (x, y) == (mascotX, mascotY):
-        return False
-    mascotX, mascotY = x, y
-    return True
-
-def present(hwnd):
-    """Render the current frame into the alpha surface and compose it on screen."""
-    # Clear to transparent; the sprite supplies every visible pixel, so its
-    # soft edges blend against nothing and no background color can bleed in.
-    ct.memset(surfaceBits, 0, surfaceWidth * surfaceHeight * 4)
-    drawSprite(surfaceDC, currentSprite, mascotX, mascotY)
-    GdiFlush()  # make sure every batched GDI call landed in the DIB
-
-    size = SIZE(surfaceWidth, surfaceHeight)
-    src = POINT(0, 0)
-    blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
-    UpdateLayeredWindow(hwnd, None, None, ct.byref(size), surfaceDC,
-                        ct.byref(src), 0, ct.byref(blend), ULW_ALPHA)
-
-def MainWin():
-    global mascot, currentSprite, mascotX, mascotY
-    global surfaceBitmap, surfaceDC, surfaceBits, surfaceWidth, surfaceHeight
-
-    # Opt into per-monitor DPI so the text stays crisp on scaled displays.
-    SetProcessDPIAware()
-
-    # Start GDI+ and the mascot before the window needs to paint.
-    gdiplusToken = ct.c_void_p()
-    gdiplusStartup = GdiplusStartupInput()
-    gdiplusStartup.GdiplusVersion = 1
-    GdiplusStartup(ct.byref(gdiplusToken), ct.byref(gdiplusStartup), None)
-    mascot = Mascot()
-
-    # Define Window Class
-    # The client area is never GDI-painted: the window is composed from the
-    # per-pixel-alpha surface instead, so no background brush is needed.
-    wndclass = WNDCLASS()
-    wndclass.style         = CS_HREDRAW | CS_VREDRAW
-    wndclass.lpfnWndProc   = WNDPROC(WndProc)
-    wndclass.cbClsExtra    = 0
-    wndclass.cbWndExtra    = 0
-    wndclass.hInstance     = GetModuleHandle(None)
-    wndclass.hIcon         = LoadIcon(None, IDI_APPLICATION)
-    wndclass.hCursor       = LoadCursor(None, IDC_ARROW)
-    wndclass.hbrBackground = None
-    wndclass.lpszMenuName  = None
-    wndclass.lpszClassName = 'MainWin'
-
-    # Register Window Class
-    RegisterClass(ct.byref(wndclass))
-
-    # Create Window. WS_EX_LAYERED is required for UpdateLayeredWindow;
-    # WS_EX_TOPMOST pins the mascot above every other window.
-    # WS_POPUP + screen-sized rect = borderless fullscreen. Swap WS_POPUP for
-    # WS_OVERLAPPEDWINDOW (and the rect for CW_USEDEFAULT) for a normal window.
-    screen_w = GetSystemMetrics(SM_CXSCREEN)
-    screen_h = GetSystemMetrics(SM_CYSCREEN)
-
-    hwnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST,
-                          wndclass.lpszClassName,
-                          'Python Window',
-                          WS_POPUP,
-                          0,
-                          0,
-                          screen_w,
-                          screen_h,
-                          None,
-                          None,
-                          wndclass.hInstance,
-                          None)
-
-    # Compose from a per-pixel-alpha surface: transparent where there is no
-    # art, so edges stay clean instead of picking up a background color.
-    surfaceBitmap, surfaceDC, surfaceBits = createSurface(screen_w, screen_h)
-    surfaceWidth, surfaceHeight = screen_w, screen_h
-
-    # Start with the sprite centered on screen.
-    currentSprite = mascot.getNextImage()
-    drawW, drawH = mascotSize(currentSprite)
-    mascotX = (surfaceWidth - drawW) // 2
-    mascotY = (surfaceHeight - drawH) // 2
-    present(hwnd)
-
-    # Show Window
-    user32.ShowWindow(hwnd, SW_SHOWNORMAL)
-    # Borderless windows don't always take focus on their own; needed for Esc.
-    SetForegroundWindow(hwnd)
-
-    # Pump Messages
-    msg = MSG()
-    while GetMessage(ct.byref(msg), None, 0, 0) != 0:
-        TranslateMessage(ct.byref(msg))
-        DispatchMessage(ct.byref(msg))
-
-    for bitmap in spriteCache.values():
-        GdipDisposeImage(bitmap)
-    spriteCache.clear()
-    GdiplusShutdown(gdiplusToken)
-    DeleteDC(surfaceDC)
-    DeleteObject(surfaceBitmap)
-
-    return msg.wParam
-
-def WndProc(hwnd, message, wParam, lParam):
-    global currentSprite, dragging
-    global dragStartX, dragStartY, dragMascotX, dragMascotY
-
-    ps = PAINTSTRUCT()
-
-    if message == WM_PAINT:
-        # The window has no GDI content; validate the update region and
-        # re-compose the layered surface (this also advances the frame).
-        BeginPaint(hwnd, ct.byref(ps))
-        currentSprite = mascot.getNextImage()
-        present(hwnd)
-        EndPaint(hwnd, ct.byref(ps))
-        return 0
-    elif message == WM_LBUTTONDOWN:
-        # Per-pixel alpha means this only fires over the mascot itself.
-        SetCapture(hwnd)
-        dragging = True
-        dragStartX = GET_X_LPARAM(lParam)
-        dragStartY = GET_Y_LPARAM(lParam)
-        dragMascotX = mascotX
-        dragMascotY = mascotY
-        return 0
-    elif message == WM_MOUSEMOVE and dragging:
-        SetCursor(LoadCursor(None, IDC_SIZEALL))
-        if moveMascot(dragMascotX + GET_X_LPARAM(lParam) - dragStartX,
-                      dragMascotY + GET_Y_LPARAM(lParam) - dragStartY):
-            present(hwnd)
-        return 0
-    elif message == WM_LBUTTONUP:
-        if dragging:
-            dragging = False
-            ReleaseCapture()
-        return 0
-    elif message == WM_CAPTURECHANGED:
-        dragging = False
-        return 0
-    elif message == WM_KEYDOWN and wParam == VK_ESCAPE:
-        PostQuitMessage(0)
-        return 0
-    elif message == WM_DESTROY:
-        PostQuitMessage(0)
-        return 0
-
+def _windowProc(hwnd, message, wParam, lParam):
+    display = _instances.get(hwnd)
+    if display is not None:
+        return display.handleMessage(hwnd, message, wParam, lParam)
     return DefWindowProc(hwnd, message, wParam, lParam)
 
-if __name__=='__main__':
-    sys.exit(MainWin())
+# Kept alive for the process lifetime; WNDCLASS stores only a pointer to it.
+_windowProcCallback = WNDPROC(_windowProc)
+
+class MascotDisplay(object):
+    """Fullscreen, always-on-top, per-pixel-alpha window showing a mascot.
+
+    Create one and call run() to start it; Esc closes the window.
+    """
+
+    def __init__(self, scale=MASCOT_SCALE, title='Python Window', className='MainWin'):
+        self.scale = scale
+        self.title = title
+        self.className = className
+
+        self.mascot = Mascot()
+        self.currentSprite = None   # sprite path currently on screen
+        self.spriteCache = {}       # PNG path -> GDI+ bitmap handle
+        self.sizeAllCursor = None
+
+        # Where the sprite sits in window coordinates.
+        self.mascotX = 0
+        self.mascotY = 0
+
+        # Drag state, in window coordinates.
+        self.dragging = False
+        self.dragStartX = 0
+        self.dragStartY = 0
+        self.dragMascotX = 0
+        self.dragMascotY = 0
+
+        # Per-pixel-alpha surface the layered window is composed from.
+        self.hwnd = None
+        self.surfaceBitmap = None
+        self.surfaceDC = None
+        self.surfaceBits = None
+        self.surfaceWidth = 0
+        self.surfaceHeight = 0
+
+        self._gdiplusToken = None
+
+    # ------------------------------------------------------------- lifecycle
+    def run(self):
+        """Create the window, pump messages until it closes, return exit code."""
+        # System DPI awareness keeps the sprite pixel-accurate on scaled displays.
+        SetProcessDPIAware()
+        self._startGdiplus()
+        try:
+            self.sizeAllCursor = LoadCursor(None, IDC_SIZEALL)
+            wndclass = self._registerClass()
+            self._createSurface()
+            self._createWindow(wndclass)
+
+            # Start with the sprite centered on screen.
+            self.currentSprite = self.mascot.getNextImage()
+            drawW, drawH = self._spriteSize(self.currentSprite)
+            self.mascotX = (self.surfaceWidth - drawW) // 2
+            self.mascotY = (self.surfaceHeight - drawH) // 2
+            self._present()
+
+            ShowWindow(self.hwnd, SW_SHOWNORMAL)
+            # Borderless windows don't always take focus on their own; needed
+            # for Esc.
+            SetForegroundWindow(self.hwnd)
+
+            return self._messageLoop()
+        finally:
+            self._shutdown()
+
+    def _startGdiplus(self):
+        token = ct.c_void_p()
+        startup = GdiplusStartupInput()
+        startup.GdiplusVersion = 1
+        GdiplusStartup(ct.byref(token), ct.byref(startup), None)
+        self._gdiplusToken = token
+
+    def _shutdown(self):
+        if self.hwnd is not None:
+            _instances.pop(self.hwnd, None)
+            self.hwnd = None
+
+        for bitmap in self.spriteCache.values():
+            GdipDisposeImage(bitmap)
+        self.spriteCache.clear()
+
+        if self._gdiplusToken is not None:
+            GdiplusShutdown(self._gdiplusToken)
+            self._gdiplusToken = None
+
+        if self.surfaceDC is not None:
+            DeleteDC(self.surfaceDC)
+            self.surfaceDC = None
+        if self.surfaceBitmap is not None:
+            DeleteObject(self.surfaceBitmap)
+            self.surfaceBitmap = None
+        self.surfaceBits = None
+
+    def _messageLoop(self):
+        msg = MSG()
+        while GetMessage(ct.byref(msg), None, 0, 0) != 0:
+            TranslateMessage(ct.byref(msg))
+            DispatchMessage(ct.byref(msg))
+        return msg.wParam
+
+    # ---------------------------------------------------------------- window
+    def _registerClass(self):
+        # The client area is never GDI-painted: the window is composed from the
+        # per-pixel-alpha surface, so no background brush.
+        wndclass = WNDCLASS()
+        wndclass.style         = CS_HREDRAW | CS_VREDRAW
+        wndclass.lpfnWndProc   = _windowProcCallback
+        wndclass.cbClsExtra    = 0
+        wndclass.cbWndExtra    = 0
+        wndclass.hInstance     = GetModuleHandle(None)
+        wndclass.hIcon         = LoadIcon(None, IDI_APPLICATION)
+        wndclass.hCursor       = LoadCursor(None, IDC_ARROW)
+        wndclass.hbrBackground = None
+        wndclass.lpszMenuName  = None
+        wndclass.lpszClassName = self.className
+        try:
+            RegisterClass(ct.byref(wndclass))
+        except OSError as exc:
+            # A second display in the same process reuses the window class.
+            if exc.winerror != ERROR_CLASS_ALREADY_EXISTS:
+                raise
+        return wndclass
+
+    def _createWindow(self, wndclass):
+        # Borderless, screen-sized, layered and always on top.
+        self.hwnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST,
+                                   wndclass.lpszClassName,
+                                   self.title,
+                                   WS_POPUP,
+                                   0, 0, self.surfaceWidth, self.surfaceHeight,
+                                   None, None, wndclass.hInstance, None)
+        _instances[self.hwnd] = self
+
+    def _createSurface(self):
+        """32-bit top-down DIB; zeroed pixels are fully transparent."""
+        self.surfaceWidth = GetSystemMetrics(SM_CXSCREEN)
+        self.surfaceHeight = GetSystemMetrics(SM_CYSCREEN)
+
+        bmi = BITMAPINFO()
+        bmi.bmiHeader.biSize = ct.sizeof(BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = self.surfaceWidth
+        bmi.bmiHeader.biHeight = -self.surfaceHeight  # negative = top-down rows
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bmi.bmiHeader.biCompression = BI_RGB
+
+        bits = ct.c_void_p()
+        self.surfaceBitmap = CreateDIBSection(None, ct.byref(bmi), DIB_RGB_COLORS,
+                                              ct.byref(bits), None, 0)
+        self.surfaceDC = CreateCompatibleDC(None)
+        SelectObject(self.surfaceDC, self.surfaceBitmap)
+        self.surfaceBits = bits
+
+    # ---------------------------------------------------------------- sprites
+    def _loadSprite(self, path):
+        """Load a sprite PNG into a cached GDI+ bitmap (keeps its alpha)."""
+        bitmap = self.spriteCache.get(path)
+        if bitmap is None:
+            bitmap = ct.c_void_p()
+            GdipCreateBitmapFromFile(path, ct.byref(bitmap))
+            self.spriteCache[path] = bitmap
+        return bitmap
+
+    def _bitmapSize(self, bitmap):
+        """On-screen size of a sprite bitmap after self.scale."""
+        width = UINT()
+        height = UINT()
+        GdipGetImageWidth(bitmap, ct.byref(width))
+        GdipGetImageHeight(bitmap, ct.byref(height))
+        return int(width.value * self.scale), int(height.value * self.scale)
+
+    def _spriteSize(self, path):
+        return self._bitmapSize(self._loadSprite(path))
+
+    def _drawSprite(self, hdc, path, x, y):
+        """Draw one sprite at (x, y), scaled by self.scale."""
+        bitmap = self._loadSprite(path)
+        drawW, drawH = self._bitmapSize(bitmap)
+
+        graphics = ct.c_void_p()
+        GdipCreateFromHDC(hdc, ct.byref(graphics))
+        GdipSetInterpolationMode(graphics, INTERPOLATION_HIGH_QUALITY_BICUBIC)
+        GdipDrawImageRectI(graphics, bitmap, x, y, drawW, drawH)
+        GdipDeleteGraphics(graphics)
+
+    # ------------------------------------------------------------ composition
+    def _moveMascot(self, x, y):
+        """Move the sprite, keeping it on screen. Returns True if it moved."""
+        drawW, drawH = self._spriteSize(self.currentSprite)
+        x = min(max(x, 0), max(0, self.surfaceWidth - drawW))
+        y = min(max(y, 0), max(0, self.surfaceHeight - drawH))
+        if (x, y) == (self.mascotX, self.mascotY):
+            return False
+        self.mascotX, self.mascotY = x, y
+        return True
+
+    def _present(self):
+        """Render the current frame into the alpha surface and compose it."""
+        # Clear to transparent; the sprite supplies every visible pixel, so its
+        # soft edges blend against nothing and no background color can bleed in.
+        ct.memset(self.surfaceBits, 0, self.surfaceWidth * self.surfaceHeight * 4)
+        self._drawSprite(self.surfaceDC, self.currentSprite, self.mascotX, self.mascotY)
+        GdiFlush()  # make sure every batched GDI call landed in the DIB
+
+        size = SIZE(self.surfaceWidth, self.surfaceHeight)
+        src = POINT(0, 0)
+        blend = BLENDFUNCTION(AC_SRC_OVER, 0, 255, AC_SRC_ALPHA)
+        UpdateLayeredWindow(self.hwnd, None, None, ct.byref(size), self.surfaceDC,
+                            ct.byref(src), 0, ct.byref(blend), ULW_ALPHA)
+
+    # --------------------------------------------------------------- messages
+    def handleMessage(self, hwnd, message, wParam, lParam):
+        if message == WM_PAINT:
+            # The window has no GDI content; validate the update region and
+            # re-compose the layered surface (this also advances the frame).
+            ps = PAINTSTRUCT()
+            BeginPaint(hwnd, ct.byref(ps))
+            self.currentSprite = self.mascot.getNextImage()
+            self._present()
+            EndPaint(hwnd, ct.byref(ps))
+            return 0
+        elif message == WM_LBUTTONDOWN:
+            # Per-pixel alpha means this only fires over the mascot itself.
+            SetCapture(hwnd)
+            self.dragging = True
+            self.dragStartX = GET_X_LPARAM(lParam)
+            self.dragStartY = GET_Y_LPARAM(lParam)
+            self.dragMascotX = self.mascotX
+            self.dragMascotY = self.mascotY
+            return 0
+        elif message == WM_MOUSEMOVE and self.dragging:
+            SetCursor(self.sizeAllCursor)
+            if self._moveMascot(self.dragMascotX + GET_X_LPARAM(lParam) - self.dragStartX,
+                                self.dragMascotY + GET_Y_LPARAM(lParam) - self.dragStartY):
+                self._present()
+            return 0
+        elif message == WM_LBUTTONUP:
+            if self.dragging:
+                self.dragging = False
+                ReleaseCapture()
+            return 0
+        elif message == WM_CAPTURECHANGED:
+            self.dragging = False
+            return 0
+        elif message == WM_DESTROY or (message == WM_KEYDOWN and wParam == VK_ESCAPE):
+            PostQuitMessage(0)
+            return 0
+
+        return DefWindowProc(hwnd, message, wParam, lParam)
+
+def main():
+    return MascotDisplay().run()
+
+if __name__ == '__main__':
+    sys.exit(main())
