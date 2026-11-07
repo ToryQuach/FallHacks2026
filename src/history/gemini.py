@@ -10,6 +10,8 @@ from google.genai import errors, types
 from PIL import Image, ImageGrab
 from pydantic import BaseModel, Field
 
+from history import HistoryQueue
+
 # ---------------------------------------------------------------------------
 # Step 1: Configuration & Client Setup
 # ---------------------------------------------------------------------------
@@ -101,13 +103,13 @@ def get_optimized_image_bytes(image_path: str, max_dim: int = 1280) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Robust API Execution with Retries
+# Step 4: Robust API Execution with History Integration
 # ---------------------------------------------------------------------------
 def get_sidekick_response(
     image_path: str,
     mouse_active: bool,
     current_timestamp: str,
-    memory_queue: Optional[List[str]] = None,
+    history_queue: Optional[HistoryQueue] = None,
     user_message: Optional[str] = None,
     model_name: str = DEFAULT_MODEL
 ) -> SidekickResponse:
@@ -115,11 +117,12 @@ def get_sidekick_response(
     image_bytes = get_optimized_image_bytes(image_path)
     image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
 
-    # 2. Package telemetry
+    # 2. Package telemetry via history_queue.form_json()
+    rolling_history = history_queue.form_json() if history_queue else []
     state_payload = {
         "timestamp": current_timestamp,
         "mouse_active": mouse_active,
-        "rolling_history": memory_queue or [],
+        "rolling_history": rolling_history,
         "user_direct_input": user_message or "None (Passive Monitoring)"
     }
 
@@ -129,7 +132,6 @@ def get_sidekick_response(
     )
 
     # 3. Fast generation config
-    # Set thinking_level to low/minimal to prevent 60-90s reasoning delays
     config = types.GenerateContentConfig(
         system_instruction=system_instruction,
         response_mime_type="application/json",
@@ -138,7 +140,6 @@ def get_sidekick_response(
         thinking_config=types.ThinkingConfig(thinking_level="low"),
     )
 
-    # Try requested model, and fallback if 503 persists
     models_to_try = [model_name]
     if model_name != FALLBACK_MODEL:
         models_to_try.append(FALLBACK_MODEL)
@@ -157,7 +158,6 @@ def get_sidekick_response(
                 break
             except errors.ServerError as e:
                 last_err = e
-                # Pause 1.5 seconds for spike to clear before retry
                 time.sleep(1.5)
             except Exception as e:
                 last_err = e
@@ -171,10 +171,19 @@ def get_sidekick_response(
 
     # Parse Pydantic object
     if hasattr(response, "parsed") and isinstance(response.parsed, SidekickResponse):
-        return response.parsed
+        result_data = response.parsed
+    else:
+        raw_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        result_data = SidekickResponse.model_validate_json(raw_text)
 
-    raw_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
-    return SidekickResponse.model_validate_json(raw_text)
+    # 4. Append the response summary into history queue
+    if history_queue is not None:
+        history_queue.append(
+            timestamp=current_timestamp,
+            entry=result_data.session_summary_entry
+        )
+
+    return result_data
 
 
 # ---------------------------------------------------------------------------
@@ -188,12 +197,24 @@ if __name__ == "__main__":
         screenshot = ImageGrab.grab()
         screenshot.save(screenshot_path)
 
+    # Initialize history queue with initial events
+    history = HistoryQueue(max_size=5)
+    history.append(
+        timestamp="14:25:00",
+        entry="User opened VS Code to work on the parser."
+    )
+    history.append(
+        timestamp="14:26:30",
+        entry="Compiler threw segmentation fault in line 42."
+    )
+
+    current_ts = "14:30:00"
     start_time = time.time()
     result = get_sidekick_response(
         image_path=screenshot_path,
         mouse_active=False,
-        current_timestamp="14:30:00",
-        memory_queue=["[14:25:00] User opened VS Code to work on the parser."],
+        current_timestamp=current_ts,
+        history_queue=history,
         user_message="Why is this segfaulting?"
     )
     elapsed = time.time() - start_time
@@ -204,3 +225,6 @@ if __name__ == "__main__":
     print("Bubble Speech: ", result.bubble_speech)
     print("Activities:    ", result.detected_activities)
     print("Summary Entry: ", result.session_summary_entry)
+
+    print("\n--- Full History Queue Contents ---")
+    print(history.form_json(as_string=True))
