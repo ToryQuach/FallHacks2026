@@ -97,10 +97,8 @@ class HistoryQueue:
 
     def form_json(self, as_string: bool = False, format_type: str = "strings") -> Any:
         """
-        Forms the history payload ready for injection into the prompt payload.
-
-        :param as_string: If True, returns a serialized JSON string; otherwise a Python list/dict.
-        :param format_type:
+        param as_string: If True, returns a serialized JSON string; otherwise a Python list/dict
+        param format_type: 
             - 'strings': Returns list of formatted strings, e.g. ["['14:20:00'] Task done"]
             - 'records': Returns list of structured dicts, e.g. [{"timestamp": ..., "entry": ...}]
         """
@@ -118,15 +116,14 @@ class HistoryQueue:
             return json.dumps(entries, indent=2)
         return entries
 
+    # Helper to return simple formatted strings for history
     def to_list(self) -> List[str]:
-        """Convenience helper returning simple formatted history strings."""
         return self.form_json(as_string=False, format_type="strings")
 
     def __len__(self) -> int:
         return self._size
 
     def __del__(self) -> None:
-        """Destructor to ensure complete unlinking on deallocation."""
         self.clear()
 
     def __enter__(self) -> "HistoryQueue":

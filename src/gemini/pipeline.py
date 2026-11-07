@@ -1,3 +1,16 @@
+"""
+pipeline.py - Main loop for the desktop sidekick.
+
+Two things happen on different timers:
+  1. OBSERVE (every 20s): take a screenshot and ask Gemini what the user is
+     doing. The one-line summary is saved to the history queue.
+  2. SPEAK (randomly every 50-70s): ask Gemini, in character, how the sidekick
+     reacts to the latest observation. This is what the sprite says.
+
+Run from the project root:
+    python src/gemini/pipeline.py
+"""
+
 import random
 import time
 from datetime import datetime
@@ -11,21 +24,28 @@ from gemini import (
     load_personality,
 )
 
-OBSERVE_SECONDS = 20          # how often to look at the screen
-RESPOND_MIN_SECONDS = 50      # sidekick speaks at a random time
-RESPOND_MAX_SECONDS = 70      # between these two values
-MEMORY_SIZE = 10              # how many past summaries the model remembers
+# Timing
+# Observation timing
+OBSERVE_SECONDS = 20
+# Response timing
+RESPOND_MIN_SECONDS = 50      
+RESPOND_MAX_SECONDS = 70      
+
+# Memory size
+MEMORY_SIZE = 30
 
 
 def next_response_time() -> float:
-    return time.monotonic() + random.uniform(RESPOND_MIN_SECONDS, RESPOND_MAX_SECONDS)
+   return time.monotonic() + random.uniform(RESPOND_MIN_SECONDS, RESPOND_MAX_SECONDS)
 
 
 def main():
-    # Read the text files once at startup
+    # Read goal.txt and personality.txt once at startup.
+    # Restart the script after editing them
     goals = load_goals()
     personality = load_personality()
 
+    # `with` clears the history when the loop exits
     with HistoryQueue(max_size=MEMORY_SIZE) as history:
         print("Sidekick running. Press Ctrl+C to stop.")
         respond_at = next_response_time()
@@ -35,17 +55,19 @@ def main():
             timestamp = datetime.now().strftime("%H:%M:%S")
 
             try:
-                # Every loop: what is the user doing? (adds obs.summary to history)
+                # 1. Observe: screenshot -> context for response
+                # appends obs.summary to history
                 obs = get_observation(
                     image_path=capture_screenshot(),
-                    mouse_active=True,  # TODO: hook up real input tracking from src/input
+                    mouse_active=True,
                     current_timestamp=timestamp,
                     history_queue=history,
                     goals=goals,
                 )
                 print(f"[{timestamp}] observe: {obs.status_classification} - {obs.summary}")
 
-                # Every 50-70s: the sidekick reacts to the latest observation
+                # 2. SPEAK: only once the random 50-70s timer is up.
+                #    Text-only call (no image), so it's cheaper than observing.
                 if time.monotonic() >= respond_at:
                     reply = get_sidekick_response(
                         observation=obs,
@@ -54,13 +76,18 @@ def main():
                         personality=personality,
                         goals=goals,
                     )
+                    # TODO: send reply.reaction / reply.bubble_speech to src/display
                     print(f"[{timestamp}] SPEAK {reply.reaction}: {reply.bubble_speech}")
                     respond_at = next_response_time()
+
             except Exception as e:
+                # Don't crash the loop on a bad API call; try again next round
                 print(f"[{timestamp}] API failed: {e}")
 
-            # Sleep the rest of the 20s so API time doesn't stretch the interval
-            time.sleep(max(0, OBSERVE_SECONDS - (time.monotonic() - loop_start)))
+            # Sleep for whatever is left of the 20s, so slow API calls
+            # don't push the schedule back
+            elapsed = time.monotonic() - loop_start
+            time.sleep(max(0, OBSERVE_SECONDS - elapsed))
 
 
 if __name__ == '__main__':

@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -127,19 +128,67 @@ Rules:
 # ---------------------------------------------------------------------------
 # Screenshots
 # ---------------------------------------------------------------------------
+def _capture_wayland(path: Path, timeout: float = 30) -> None:
+    """Take a screenshot on Wayland through the XDG desktop portal.
+
+    Pillow can't capture on Wayland, so we ask the desktop for one instead.
+    The first time, GNOME pops up an "Allow screenshots?" dialog; click Allow
+    and it is remembered. (The dialog only appears if the terminal running
+    this script is focused.)
+    """
+    from urllib.parse import unquote, urlparse
+    from jeepney import DBusAddress, MatchRule, new_method_call
+    from jeepney.io.blocking import open_dbus_connection
+
+    portal = DBusAddress("/org/freedesktop/portal/desktop",
+                         bus_name="org.freedesktop.portal.Desktop",
+                         interface="org.freedesktop.portal.Screenshot")
+    dbus = DBusAddress("/org/freedesktop/DBus", bus_name="org.freedesktop.DBus",
+                       interface="org.freedesktop.DBus")
+
+    with open_dbus_connection(bus="SESSION") as conn:
+        # The portal replies with a "Response" signal on a path we can predict
+        token = f"sidekick{int(time.time() * 1000)}"
+        sender = conn.unique_name[1:].replace(".", "_")
+        handle = f"/org/freedesktop/portal/desktop/request/{sender}/{token}"
+        rule = MatchRule(type="signal", interface="org.freedesktop.portal.Request",
+                         member="Response", path=handle)
+        conn.send_and_get_reply(new_method_call(dbus, "AddMatch", "s", (rule.serialise(),)))
+
+        with conn.filter(rule) as replies:
+            conn.send_and_get_reply(new_method_call(
+                portal, "Screenshot", "sa{sv}",
+                ("", {"handle_token": ("s", token), "interactive": ("b", False)}),
+            ))
+            code, results = conn.recv_until_filtered(replies, timeout=timeout).body
+
+    if code != 0:
+        raise RuntimeError(
+            "Screenshot permission denied. Run the script from a focused terminal "
+            "and click Allow when GNOME asks."
+        )
+
+    # The portal saves to ~/Pictures; move it to our path so Pictures doesn't fill up
+    saved = Path(unquote(urlparse(results["uri"][1]).path))
+    shutil.move(saved, path)
+
+
 def capture_screenshot(path: Path = SCREENSHOT_PATH) -> str:
-    """Grab the screen and save it to `path`. On Wayland, or if capture fails,
-    keep using the existing file at `path`."""
-    # Pillow can't capture on Wayland, and its gnome-screenshot fallback hangs
-    if os.getenv("XDG_SESSION_TYPE") == "wayland":
-        if not Path(path).exists():
-            raise RuntimeError(f"Can't capture the screen on Wayland and no screenshot at {path}")
-        return str(path)
+    """Take a screenshot, save it to `path`, and return the path as a string.
+
+    - Wayland (Ubuntu default): uses the desktop portal (see _capture_wayland).
+    - Xorg / Windows / macOS: uses Pillow's ImageGrab.
+    If capture fails and an older screenshot exists at `path`, reuse that one.
+    """
     try:
-        ImageGrab.grab().save(path)
-    except OSError:
+        if os.getenv("XDG_SESSION_TYPE") == "wayland":
+            _capture_wayland(Path(path))
+        else:
+            ImageGrab.grab().save(path)
+    except Exception as e:
         if not Path(path).exists():
             raise
+        print(f"Screenshot failed ({e}); reusing the last one.")
     return str(path)
 
 

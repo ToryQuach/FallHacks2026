@@ -4,3 +4,4 @@ python-dotenv
 pillow
 pynput
 pyautogui
+jeepney; sys_platform == "linux"
