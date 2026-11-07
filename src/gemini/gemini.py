@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import List, Literal, Optional
@@ -10,7 +11,9 @@ from google.genai import errors, types
 from PIL import Image, ImageGrab
 from pydantic import BaseModel, Field
 
-from history import HistoryQueue
+# history.py lives in src/history, so add that folder to the import path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "history"))
+from history import HistoryQueue  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Config
@@ -135,11 +138,7 @@ def get_optimized_image_bytes(image_path: str, max_dim: int = 1280) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-<<<<<<< HEAD:src/gemini/gemini.py
-# API call with retries
-=======
-# Step 4: Robust API Execution with History Integration
->>>>>>> 27e227614e68cab22ea20ef46ce65b20b7c367c6:src/history/gemini.py
+# API call with retries (also appends the summary to history_queue)
 # ---------------------------------------------------------------------------
 def get_sidekick_response(
     image_path: str,
@@ -230,13 +229,6 @@ def get_sidekick_response(
 # Execution
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    screenshot_path = "temp_screen.png"
-
-    # Capture live screen if not present
-    if not Path(screenshot_path).exists():
-        screenshot = ImageGrab.grab()
-        screenshot.save(screenshot_path)
-
     # Initialize history queue with initial events
     history = HistoryQueue(max_size=5)
     history.append(
