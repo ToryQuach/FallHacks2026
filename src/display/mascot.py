@@ -10,6 +10,7 @@ class Mascot:
     DISAPPOINTMENT_SPRITE_PATH = os.path.join(_HERE, "resources", "sprites", "disappointment")
     EXCITEMENT_SPRITE_PATH     = os.path.join(_HERE, "resources", "sprites", "excitement")
     HAPPINESS_SPRITE_PATH      = os.path.join(_HERE, "resources", "sprites", "happiness")
+    SCROLL_SPRITE_PATH         = os.path.join(_HERE, "resources", "sprites", "scroll")
 
     DEFAULT        = 0
     ANGER          = 1
@@ -17,6 +18,7 @@ class Mascot:
     DISAPPOINTMENT = 3
     EXCITEMENT     = 4
     HAPPINESS      = 5
+    SCROLL         = 6
 
     def __init__(self):
         self.sprites = {
@@ -25,7 +27,8 @@ class Mascot:
             self.ANNOYANCE:      ImagePathIterator(self.ANNOYANCE_SPRITE_PATH, 0),
             self.DISAPPOINTMENT: ImagePathIterator(self.DISAPPOINTMENT_SPRITE_PATH, 0),
             self.EXCITEMENT:     ImagePathIterator(self.EXCITEMENT_SPRITE_PATH, 0),
-            self.HAPPINESS:      ImagePathIterator(self.HAPPINESS_SPRITE_PATH, 0)
+            self.HAPPINESS:      ImagePathIterator(self.HAPPINESS_SPRITE_PATH, 0),
+            self.SCROLL:         ImagePathIterator(self.SCROLL_SPRITE_PATH, 0)
         }
         self.currState = self.DEFAULT
 

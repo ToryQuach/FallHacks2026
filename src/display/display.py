@@ -1,5 +1,6 @@
 from __future__ import unicode_literals
 
+import os
 import sys
 import ctypes as ct
 
@@ -46,6 +47,12 @@ class RECT(ct.Structure):
                 ('top', LONG),
                 ('right', LONG),
                 ('bottom', LONG))
+
+class RectF(ct.Structure):
+    _fields_ = (('x', ct.c_float),
+                ('y', ct.c_float),
+                ('width', ct.c_float),
+                ('height', ct.c_float))
 
 class SIZE(ct.Structure):
     _fields_ = (('cx', LONG),
@@ -183,6 +190,8 @@ UpdateLayeredWindow = bind(user32, 'UpdateLayeredWindow',
                            (HWND, HDC, ct.POINTER(POINT), ct.POINTER(SIZE), HDC,
                             ct.POINTER(POINT), DWORD, ct.POINTER(BLENDFUNCTION), DWORD),
                            BOOL, errcheck)
+SetTimer = bind(user32, 'SetTimer', (HWND, ct.c_size_t, UINT, LPVOID), ct.c_size_t, errcheck)
+KillTimer = bind(user32, 'KillTimer', (HWND, ct.c_size_t), BOOL)
 
 # --------------------------------------------------------------------- gdi32
 gdi32 = ct.WinDLL('gdi32', use_last_error=True)
@@ -219,6 +228,42 @@ GdipDrawImageRectI = bind(gdiplus, 'GdipDrawImageRectI',
 GdipDeleteGraphics = bind(gdiplus, 'GdipDeleteGraphics', (ct.c_void_p,), ct.c_int)
 GdipDisposeImage = bind(gdiplus, 'GdipDisposeImage', (ct.c_void_p,), ct.c_int)
 
+GdipSetTextRenderingHint = bind(gdiplus, 'GdipSetTextRenderingHint',
+                                (ct.c_void_p, ct.c_int), ct.c_int)
+GdipSetClipRectI = bind(gdiplus, 'GdipSetClipRectI',
+                        (ct.c_void_p, ct.c_int, ct.c_int, ct.c_int, ct.c_int, ct.c_int), ct.c_int)
+GdipFillRectangleI = bind(gdiplus, 'GdipFillRectangleI',
+                          (ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_int, ct.c_int, ct.c_int),
+                          ct.c_int)
+GdipCreateFontFamilyFromName = bind(gdiplus, 'GdipCreateFontFamilyFromName',
+                                    (LPCWSTR, ct.c_void_p, ct.POINTER(ct.c_void_p)),
+                                    ct.c_int, gdipcheck)
+GdipDeleteFontFamily = bind(gdiplus, 'GdipDeleteFontFamily', (ct.c_void_p,), ct.c_int)
+GdipCreateFont = bind(gdiplus, 'GdipCreateFont',
+                      (ct.c_void_p, ct.c_float, ct.c_int, ct.c_int, ct.POINTER(ct.c_void_p)),
+                      ct.c_int, gdipcheck)
+GdipDeleteFont = bind(gdiplus, 'GdipDeleteFont', (ct.c_void_p,), ct.c_int)
+GdipCreateSolidFill = bind(gdiplus, 'GdipCreateSolidFill',
+                           (ct.c_uint, ct.POINTER(ct.c_void_p)), ct.c_int, gdipcheck)
+GdipDeleteBrush = bind(gdiplus, 'GdipDeleteBrush', (ct.c_void_p,), ct.c_int)
+GdipCreateStringFormat = bind(gdiplus, 'GdipCreateStringFormat',
+                              (ct.c_int, ct.c_ushort, ct.POINTER(ct.c_void_p)),
+                              ct.c_int, gdipcheck)
+GdipSetStringFormatFlags = bind(gdiplus, 'GdipSetStringFormatFlags',
+                                (ct.c_void_p, ct.c_int), ct.c_int)
+GdipSetStringFormatLineAlign = bind(gdiplus, 'GdipSetStringFormatLineAlign',
+                                    (ct.c_void_p, ct.c_int), ct.c_int)
+GdipDeleteStringFormat = bind(gdiplus, 'GdipDeleteStringFormat', (ct.c_void_p,), ct.c_int)
+GdipMeasureString = bind(gdiplus, 'GdipMeasureString',
+                         (ct.c_void_p, LPCWSTR, ct.c_int, ct.c_void_p, ct.POINTER(RectF),
+                          ct.c_void_p, ct.POINTER(RectF), ct.POINTER(ct.c_int),
+                          ct.POINTER(ct.c_int)),
+                         ct.c_int, gdipcheck)
+GdipDrawString = bind(gdiplus, 'GdipDrawString',
+                      (ct.c_void_p, LPCWSTR, ct.c_int, ct.c_void_p, ct.POINTER(RectF),
+                       ct.c_void_p, ct.c_void_p),
+                      ct.c_int, gdipcheck)
+
 # ------------------------------------------------------------------ constants
 IDI_APPLICATION = MAKEINTRESOURCE(32512)
 IDC_ARROW = MAKEINTRESOURCE(32512)
@@ -237,6 +282,9 @@ DIB_RGB_COLORS = 0
 
 SM_CXSCREEN = 0
 SM_CYSCREEN = 1
+
+SM_CXDRAG = 68
+SM_CYDRAG = 69
 
 CS_HREDRAW = 2
 CS_VREDRAW = 1
@@ -259,6 +307,28 @@ ERROR_CLASS_ALREADY_EXISTS = 1410
 # natural size. Pass MascotDisplay(scale=...) to override:
 # 0.25 = small, 0.5 = half size, 1.0 = full size.
 MASCOT_SCALE = 0.35
+
+WM_CHAR = 0x0102
+WM_TIMER = 0x0113
+CARET_TIMER_ID = 1
+CARET_BLINK_MS = 530
+
+TEXT_RENDERING_ANTIALIAS = 4
+UNIT_PIXEL = 2
+COMBINE_REPLACE = 0
+# NoFitBlackBox | MeasureTrailingSpaces | NoWrap | LineLimit | NoClip
+STRING_FORMAT_FLAGS = 0x0004 | 0x0800 | 0x1000 | 0x2000 | 0x4000
+
+# Input box per sprite: (left, top, right, bottom) in the PNG's natural pixels,
+# keyed by file name. These numbers are estimated from a preview, so check
+# them in an image editor and adjust.
+INPUT_RECTS = {
+    'scroll_input_long.png': (700, 20, 2000, 715),
+}
+INPUT_PADDING = 40          # natural px of space inside the box edges
+INPUT_FONT_PX = 120         # natural px; scaled by MASCOT_SCALE like the sprite
+INPUT_TEXT_ARGB = 0xFF131313
+
 # -------------------------------------------------------------------------
 INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
 
@@ -280,7 +350,7 @@ class MascotDisplay(object):
     Create one and call run() to start it; Esc closes the window.
     """
 
-    def __init__(self, scale=MASCOT_SCALE, title='Python Window', className='MainWin'):
+    def __init__(self, scale=MASCOT_SCALE, title='Python Window', className='MainWin', onSubmit=None):
         self.scale = scale
         self.title = title
         self.className = className
@@ -294,12 +364,28 @@ class MascotDisplay(object):
         self.mascotX = 0
         self.mascotY = 0
 
+        # States
+        self.previousState = self.mascot.getState()
+        self.isScrolling = False
+
         # Drag state, in window coordinates.
         self.dragging = False
+        self.dragMoved = False
         self.dragStartX = 0
         self.dragStartY = 0
         self.dragMascotX = 0
         self.dragMascotY = 0
+
+        # Text input
+        self.onSubmit = onSubmit        # callback(text) fired on Enter
+        self.inputText = ''
+        self.caretOn = True
+        self.fontPx = INPUT_FONT_PX * scale
+        self._pendingHigh = None        # first half of a surrogate pair
+        self._fontFamily = None
+        self._font = None
+        self._textBrush = None
+        self._textFormat = None
 
         # Per-pixel-alpha surface the layered window is composed from.
         self.hwnd = None
@@ -318,6 +404,13 @@ class MascotDisplay(object):
         SetProcessDPIAware()
         self._startGdiplus()
         try:
+            self._createTextResources()
+            self.sizeAllCursor = LoadCursor(None, IDC_SIZEALL)
+            wndclass = self._registerClass()
+            self._createSurface()
+            self._createWindow(wndclass)
+            SetTimer(self.hwnd, CARET_TIMER_ID, CARET_BLINK_MS, None)
+            
             self.sizeAllCursor = LoadCursor(None, IDC_SIZEALL)
             wndclass = self._registerClass()
             self._createSurface()
@@ -348,6 +441,7 @@ class MascotDisplay(object):
 
     def _shutdown(self):
         if self.hwnd is not None:
+            KillTimer(self.hwnd, CARET_TIMER_ID)
             _instances.pop(self.hwnd, None)
             self.hwnd = None
 
@@ -459,6 +553,26 @@ class MascotDisplay(object):
         GdipDrawImageRectI(graphics, bitmap, x, y, drawW, drawH)
         GdipDeleteGraphics(graphics)
 
+    def _setSprite(self, path):
+        """Swap the current sprite, keeping its center fixed on screen."""
+        if not path:
+            return
+        path = str(path)
+        if self.currentSprite is None:
+            self.currentSprite = path
+            return
+
+        oldW, oldH = self._spriteSize(self.currentSprite)
+        cx = self.mascotX + oldW // 2
+        cy = self.mascotY + oldH // 2
+
+        self.currentSprite = path
+        newW, newH = self._spriteSize(path)
+
+        # _moveMascot measures the sprite in self.currentSprite, so set that
+        # first. It also clamps the result to stay fully on screen.
+        self._moveMascot(cx - newW // 2, cy - newH // 2)
+
     # ------------------------------------------------------------ composition
     def _moveMascot(self, x, y):
         """Move the sprite, keeping it on screen. Returns True if it moved."""
@@ -484,6 +598,19 @@ class MascotDisplay(object):
         UpdateLayeredWindow(self.hwnd, None, None, ct.byref(size), self.surfaceDC,
                             ct.byref(src), 0, ct.byref(blend), ULW_ALPHA)
 
+    def _onClick(self):
+        """Called on a click that wasn't a drag."""
+        self.isScrolling = not self.isScrolling
+
+        if self.isScrolling:
+            self.previousState = self.mascot.getState()
+            self.mascot.setState(Mascot.SCROLL)
+        else:
+            self.mascot.setState(self.previousState)
+
+        self._setSprite(self.mascot.getNextImage())
+        self._present()
+
     # --------------------------------------------------------------- messages
     def handleMessage(self, hwnd, message, wParam, lParam):
         if message == WM_PAINT:
@@ -499,21 +626,31 @@ class MascotDisplay(object):
             # Per-pixel alpha means this only fires over the mascot itself.
             SetCapture(hwnd)
             self.dragging = True
+            self.dragMoved = False
             self.dragStartX = GET_X_LPARAM(lParam)
             self.dragStartY = GET_Y_LPARAM(lParam)
             self.dragMascotX = self.mascotX
             self.dragMascotY = self.mascotY
             return 0
         elif message == WM_MOUSEMOVE and self.dragging:
-            SetCursor(self.sizeAllCursor)
-            if self._moveMascot(self.dragMascotX + GET_X_LPARAM(lParam) - self.dragStartX,
-                                self.dragMascotY + GET_Y_LPARAM(lParam) - self.dragStartY):
-                self._present()
+            dx = GET_X_LPARAM(lParam) - self.dragStartX
+            dy = GET_Y_LPARAM(lParam) - self.dragStartY
+            if not self.dragMoved:
+                if (abs(dx) > GetSystemMetrics(SM_CXDRAG) or
+                        abs(dy) > GetSystemMetrics(SM_CYDRAG)):
+                    self.dragMoved = True
+            if self.dragMoved:
+                SetCursor(self.sizeAllCursor)
+                if self._moveMascot(self.dragMascotX + dx, self.dragMascotY + dy):
+                    self._present()
             return 0
         elif message == WM_LBUTTONUP:
             if self.dragging:
+                wasClick = not self.dragMoved
                 self.dragging = False
                 ReleaseCapture()
+                if wasClick:
+                    self._onClick()
             return 0
         elif message == WM_CAPTURECHANGED:
             self.dragging = False
