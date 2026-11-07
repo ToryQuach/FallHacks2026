@@ -27,12 +27,20 @@ class Mascot:
         }
         self.currState = self.DEFAULT
 
+    # Setters
     def setState(self, state):
         self.currState = state
-        
+        self.setCurStateFrame(0)
 
+    def setCurStateFrame(self, frame):
+        self.getCurSpriteIterator().setFrame(frame)
+
+    # Getters
     def getState(self):
         return self.currState
 
+    def getCurSpriteIterator(self):
+        return self.sprites[self.currState]
+
     def getNextImage(self):
-        pass
+        return self.getCurSpriteIterator().__next__()
