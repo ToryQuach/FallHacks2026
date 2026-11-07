@@ -2,3 +2,5 @@ google-genai
 pydantic
 python-dotenv
 pillow
+pynput
+pyautogui

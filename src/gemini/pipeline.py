@@ -1,45 +1,66 @@
+import random
 import time
 from datetime import datetime
 
 from gemini import (
     HistoryQueue,
     capture_screenshot,
+    get_observation,
     get_sidekick_response,
-    load_system_instruction,
+    load_goals,
+    load_personality,
 )
 
-LOOP_SECONDS = 10    # how often to check the screen
-MEMORY_SIZE = 10     # how many past summaries the model remembers
+OBSERVE_SECONDS = 20          # how often to look at the screen
+RESPOND_MIN_SECONDS = 50      # sidekick speaks at a random time
+RESPOND_MAX_SECONDS = 70      # between these two values
+MEMORY_SIZE = 10              # how many past summaries the model remembers
+
+
+def next_response_time() -> float:
+    return time.monotonic() + random.uniform(RESPOND_MIN_SECONDS, RESPOND_MAX_SECONDS)
 
 
 def main():
-    # Build the prompt once at startup (re-call this if personality/goals change)
-    system_instruction = load_system_instruction()
+    # Read the text files once at startup
+    goals = load_goals()
+    personality = load_personality()
 
     with HistoryQueue(max_size=MEMORY_SIZE) as history:
         print("Sidekick running. Press Ctrl+C to stop.")
+        respond_at = next_response_time()
+
         while True:
-            image_path = capture_screenshot()
+            loop_start = time.monotonic()
             timestamp = datetime.now().strftime("%H:%M:%S")
 
             try:
-                # Also appends result.session_summary_entry to history
-                result = get_sidekick_response(
-                    image_path=image_path,
+                # Every loop: what is the user doing? (adds obs.summary to history)
+                obs = get_observation(
+                    image_path=capture_screenshot(),
                     mouse_active=True,  # TODO: hook up real input tracking from src/input
                     current_timestamp=timestamp,
                     history_queue=history,
-                    system_instruction=system_instruction,
+                    goals=goals,
                 )
-            except RuntimeError as e:
-                print(f"[{timestamp}] API failed: {e}")
-            else:
-                print(f"[{timestamp}] {result.status_classification} / {result.reaction}: {result.bubble_speech}; {result.detected_activities}")
-                print(f"  History ({len(history)}/{MEMORY_SIZE}):")
-                for line in history.to_list():
-                    print(f"    {line}")
+                print(f"[{timestamp}] observe: {obs.status_classification} - {obs.summary}")
 
-            time.sleep(LOOP_SECONDS)
+                # Every 50-70s: the sidekick reacts to the latest observation
+                if time.monotonic() >= respond_at:
+                    reply = get_sidekick_response(
+                        observation=obs,
+                        current_timestamp=timestamp,
+                        history_queue=history,
+                        personality=personality,
+                        goals=goals,
+                    )
+                    print(f"[{timestamp}] SPEAK {reply.reaction}: {reply.bubble_speech}")
+                    respond_at = next_response_time()
+            except Exception as e:
+                print(f"[{timestamp}] API failed: {e}")
+
+            # Sleep the rest of the 20s so API time doesn't stretch the interval
+            time.sleep(max(0, OBSERVE_SECONDS - (time.monotonic() - loop_start)))
 
 
 if __name__ == '__main__':
