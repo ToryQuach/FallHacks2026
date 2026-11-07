@@ -11,23 +11,37 @@ from PIL import Image, ImageGrab
 from pydantic import BaseModel, Field
 
 # ---------------------------------------------------------------------------
-# Step 1: Configuration & Client Setup
+# Config
 # ---------------------------------------------------------------------------
 load_dotenv()
-
-api_key = os.getenv("GEMINI_API_KEY")
-if not api_key:
-    raise ValueError("GEMINI_API_KEY not found in .env file or environment.")
 
 # gemini-3.5-flash-lite offers fast inference and high availability
 DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 FALLBACK_MODEL = "gemini-3.8-flash"
 
-client = genai.Client(api_key=api_key)
+# src/history holds personality.txt, goal.txt and the screenshot
+HISTORY_DIR = Path(__file__).resolve().parent.parent / "history"
+SCREENSHOT_PATH = HISTORY_DIR / "temp_screen.png"
+
+DEFAULT_PERSONALITY = "You are a witty, mildly sarcastic digital desktop sidekick. Keep comments concise and sharp."
+DEFAULT_GOALS = "Focus on programming, debugging, and reading documentation. Avoid social media, videos, and games."
+
+_client: Optional[genai.Client] = None
+
+
+def get_client() -> genai.Client:
+    """Create the Gemini client on first use and reuse it after that."""
+    global _client
+    if _client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY not found in .env file or environment.")
+        _client = genai.Client(api_key=api_key)
+    return _client
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Schema Definition
+# Schema
 # ---------------------------------------------------------------------------
 class SidekickResponse(BaseModel):
     status_classification: Literal["FOCUSING", "STRUGGLING", "DISTRACTED", "CELEBRATING"] = Field(
@@ -50,9 +64,9 @@ class SidekickResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Step 3: Persona and Goal
+# Persona and goals
 # ---------------------------------------------------------------------------
-def load_text_or_default(filepath: str, default: str) -> str:
+def load_text_or_default(filepath: Path, default: str) -> str:
     path = Path(filepath)
     if path.is_file():
         content = path.read_text(encoding="utf-8").strip()
@@ -60,17 +74,9 @@ def load_text_or_default(filepath: str, default: str) -> str:
             return content
     return default
 
-personality = load_text_or_default(
-    "personality.txt",
-    "You are a witty, mildly sarcastic digital desktop sidekick. Keep comments concise and sharp."
-)
 
-goals = load_text_or_default(
-    "goal.txt",
-    "Focus on programming, debugging, and reading documentation. Avoid social media, videos, and games."
-)
-
-system_instruction = f"""# SYSTEM INSTRUCTION: Autonomous Desktop Side-Kick Engine
+def build_system_instruction(personality: str, goals: str) -> str:
+    return f"""# SYSTEM INSTRUCTION: Autonomous Desktop Side-Kick Engine
 
 ## Persona
 {personality}
@@ -89,6 +95,32 @@ Rules:
 """
 
 
+def load_system_instruction(history_dir: Path = HISTORY_DIR) -> str:
+    """Read personality.txt and goal.txt (or use defaults) and build the prompt."""
+    personality = load_text_or_default(history_dir / "personality.txt", DEFAULT_PERSONALITY)
+    goals = load_text_or_default(history_dir / "goal.txt", DEFAULT_GOALS)
+    return build_system_instruction(personality, goals)
+
+
+# ---------------------------------------------------------------------------
+# Screenshots
+# ---------------------------------------------------------------------------
+def capture_screenshot(path: Path = SCREENSHOT_PATH) -> str:
+    """Grab the screen and save it to `path`. On Wayland, or if capture fails,
+    keep using the existing file at `path`."""
+    # Pillow can't capture on Wayland, and its gnome-screenshot fallback hangs
+    if os.getenv("XDG_SESSION_TYPE") == "wayland":
+        if not Path(path).exists():
+            raise RuntimeError(f"Can't capture the screen on Wayland and no screenshot at {path}")
+        return str(path)
+    try:
+        ImageGrab.grab().save(path)
+    except OSError:
+        if not Path(path).exists():
+            raise
+    return str(path)
+
+
 def get_optimized_image_bytes(image_path: str, max_dim: int = 1280) -> bytes:
     """Downscales and compresses screenshots to keep network latency under 200ms."""
     with Image.open(image_path) as img:
@@ -101,7 +133,7 @@ def get_optimized_image_bytes(image_path: str, max_dim: int = 1280) -> bytes:
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Robust API Execution with Retries
+# API call with retries
 # ---------------------------------------------------------------------------
 def get_sidekick_response(
     image_path: str,
@@ -109,8 +141,12 @@ def get_sidekick_response(
     current_timestamp: str,
     memory_queue: Optional[List[str]] = None,
     user_message: Optional[str] = None,
-    model_name: str = DEFAULT_MODEL
+    model_name: str = DEFAULT_MODEL,
+    system_instruction: Optional[str] = None,
 ) -> SidekickResponse:
+    if system_instruction is None:
+        system_instruction = load_system_instruction()
+
     # 1. Compress screenshot
     image_bytes = get_optimized_image_bytes(image_path)
     image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
@@ -149,7 +185,7 @@ def get_sidekick_response(
     for target_model in models_to_try:
         for attempt in range(2):
             try:
-                response = client.models.generate_content(
+                response = get_client().models.generate_content(
                     model=target_model,
                     contents=[prompt_text, image_part],
                     config=config,
@@ -181,28 +217,14 @@ def get_sidekick_response(
 # Execution
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Use the saved screenshot in src/history (path is relative to this file,
-    # so it works no matter which folder you run the script from)
-    screenshot_path = str(Path(__file__).resolve().parent.parent / "history" / "temp_screen.png")
-
-    # Capture live screen if not present
-    if not Path(screenshot_path).exists():
-        screenshot = ImageGrab.grab()
-        screenshot.save(screenshot_path)
-
+    # Quick test: run once on the saved screenshot
     start_time = time.time()
     result = get_sidekick_response(
-        image_path=screenshot_path,
+        image_path=str(SCREENSHOT_PATH),
         mouse_active=False,
         current_timestamp="14:30:00",
         memory_queue=["[14:25:00] User opened VS Code to work on the parser."],
-        user_message="Why is this segfaulting?"
+        user_message="Why is this segfaulting?",
     )
-    elapsed = time.time() - start_time
-
-    print(f"\n[Finished in {elapsed:.2f}s]")
-    print("Classification:", result.status_classification)
-    print("Reaction:      ", result.reaction)
-    print("Bubble Speech: ", result.bubble_speech)
-    print("Activities:    ", result.detected_activities)
-    print("Summary Entry: ", result.session_summary_entry)
+    print(f"\n[Finished in {time.time() - start_time:.2f}s]")
+    print(result.model_dump_json(indent=2))
