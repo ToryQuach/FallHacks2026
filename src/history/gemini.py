@@ -1,12 +1,29 @@
 import os
 import json
+from pathlib import Path
 from typing import List, Literal, Optional
+from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
 
 # ---------------------------------------------------------------------------
-# 1. Pydantic Structured Output Schema
+# Step 1: Read GEMINI_API_KEY & Model Config from .env
+# ---------------------------------------------------------------------------
+load_dotenv()
+
+api_key = os.getenv("GEMINI_API_KEY")
+if not api_key:
+    raise ValueError("GEMINI_API_KEY not found in .env file or environment.")
+
+# Default to Gemma 4 (falls back to gemma-4-31b-it or whatever you specify in .env)
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemma-4-31b-it")
+
+client = genai.Client(api_key=api_key)
+
+
+# ---------------------------------------------------------------------------
+# Schema Definition
 # ---------------------------------------------------------------------------
 class SidekickResponse(BaseModel):
     status_classification: Literal["FOCUSING", "STRUGGLING", "DISTRACTED", "CELEBRATING"] = Field(
@@ -29,126 +46,116 @@ class SidekickResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 2. Side-Kick Engine Class
+# Step 2: Build the Personality and Goal
 # ---------------------------------------------------------------------------
-class DesktopSidekickAgent:
-    def __init__(
-        self,
-        personality_path: str = "personality.txt",
-        goal_path: str = "goal.txt",
-        api_key: Optional[str] = None
-    ):
-        self.client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
-        self.model_name = "gemini-2.5-flash"  # Fast inference for real-time desktop loop
-        
-        # Load personality and session goal
-        self.personality = self._read_file(personality_path, "You are a witty, mildly sarcastic digital side-kick.")
-        self.goals = self._read_file(goal_path, "Complete programming tasks and avoid distractions.")
-        
-        # Rolling short-term memory (stores last N session_summary_entry strings)
-        self.memory_queue: List[str] = []
-        self.max_memory = 8
+def load_text_or_default(filepath: str, default: str) -> str:
+    path = Path(filepath)
+    if path.is_file():
+        content = path.read_text(encoding="utf-8").strip()
+        if content:
+            return content
+    return default
 
-    def _read_file(self, filepath: str, fallback: str) -> str:
-        if os.path.exists(filepath):
-            with open(filepath, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                return content if content else fallback
-        return fallback
+personality = load_text_or_default(
+    "personality.txt",
+    "You are a witty, mildly sarcastic digital desktop sidekick. Keep comments concise and sharp."
+)
 
-    def build_system_instruction(self) -> str:
-        return f"""# SYSTEM INSTRUCTION: Autonomous Desktop Side-Kick Engine
+goals = load_text_or_default(
+    "goal.txt",
+    "Focus on programming, debugging, and reading documentation. Avoid social media, videos, and games."
+)
 
-## 1. Persona Configuration
-[INJECTED FROM personality.txt]
-{self.personality}
-[END PERSONALITY]
+system_instruction = f"""# SYSTEM INSTRUCTION: Autonomous Desktop Side-Kick Engine
 
-Tone Rules:
-- Embody the persona authentically.
-- No meta-commentary, AI assistant clichés, or robotic pleasantries.
-- Keep `bubble_speech` under 35 words for compact speech bubbles.
+## Persona
+{personality}
 
-## 2. Session Context & Goals
-[INJECTED FROM goal.txt]
-{self.goals}
-[END SESSION_GOALS]
+Rules:
+- Embody the persona directly without AI boilerplate or generic cheerleading.
+- Keep `bubble_speech` under 35 words.
 
-## 3. Evaluation Framework
-- Cross-reference visible apps against goals.
-- If mouse activity is False and an error trace/code is stuck on screen, classify as STRUGGLING.
-- If distracting media/games are open during work, classify as DISTRACTED and select annoyed, angry, or kick_screen.
-- Keep rolling summary entries tight and factual.
+## Session Goals
+{goals}
+
+## Assessment Rules
+- If idle/no input while stuck on an error trace or compiler output, status is STRUGGLING.
+- If non-work media or games are active, status is DISTRACTED.
+- If making steady progress or tests pass, status is FOCUSING or CELEBRATING.
 """
 
-    def analyze_frame(
-        self,
-        image_path: str,
-        mouse_active: bool,
-        current_timestamp: str,
-        user_message: Optional[str] = None
-    ) -> SidekickResponse:
-        """
-        Sends current screenshot and input state to Gemini and returns structured output.
-        """
-        # Upload screenshot to Files API or pass inline
-        with open(image_path, "rb") as img_file:
-            image_bytes = img_file.read()
 
-        image_part = types.Part.from_bytes(
-            data=image_bytes,
-            mime_type="image/png"
-        )
+# ---------------------------------------------------------------------------
+# Step 3: Get the Response Using Current Method (Default: Gemma)
+# ---------------------------------------------------------------------------
+def get_sidekick_response(
+    image_path: str,
+    mouse_active: bool,
+    current_timestamp: str,
+    memory_queue: Optional[List[str]] = None,
+    user_message: Optional[str] = None,
+    model_name: str = DEFAULT_MODEL
+) -> SidekickResponse:
+    # 1. Package the screenshot
+    image_bytes = Path(image_path).read_bytes()
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
 
-        # Context JSON metadata payload
-        state_payload = {
-            "timestamp": current_timestamp,
-            "mouse_active": mouse_active,
-            "rolling_history": self.memory_queue,
-            "user_direct_input": user_message if user_message else "None (Passive Monitoring)"
-        }
+    # 2. Package telemetry & context
+    state_payload = {
+        "timestamp": current_timestamp,
+        "mouse_active": mouse_active,
+        "rolling_history": memory_queue or [],
+        "user_direct_input": user_message or "None (Passive Monitoring)"
+    }
 
-        prompt_text = (
-            f"Analyze this desktop state payload:\n"
-            f"```json\n{json.dumps(state_payload, indent=2)}\n```\n"
-            f"Inspect the attached screenshot and output your response matching the schema."
-        )
+    prompt_text = (
+        f"Telemetry:\n```json\n{json.dumps(state_payload, indent=2)}\n```\n"
+        "Evaluate the screenshot against session goals and respond via the schema."
+    )
 
-        response = self.client.models.generate_content(
-            model=self.model_name,
-            contents=[prompt_text, image_part],
-            config=types.GenerateContentConfig(
-                system_instruction=self.build_system_instruction(),
-                response_mime_type="application/json",
-                response_schema=SidekickResponse,
-                temperature=0.7,
-            )
-        )
+    # 3. Call the API with structured output schema
+    response = client.models.generate_content(
+        model=model_name,
+        contents=[prompt_text, image_part],
+        config=types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=SidekickResponse,
+            temperature=0.4,
+        ),
+    )
 
-        # Parse output into Pydantic model
-        result_data: SidekickResponse = response.parsed
+    # Direct parsed object or string fallback parsing
+    if hasattr(response, "parsed") and isinstance(response.parsed, SidekickResponse):
+        return response.parsed
 
-        # Update rolling memory queue
-        self.memory_queue.append(f"[{current_timestamp}] {result_data.session_summary_entry}")
-        if len(self.memory_queue) > self.max_memory:
-            self.memory_queue.pop(0)
-
-        return result_data
+    raw_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+    return SidekickResponse.model_validate_json(raw_text)
 
 
 # ---------------------------------------------------------------------------
-# 3. Example Driver Execution
+# Execution
 # ---------------------------------------------------------------------------
+from PIL import ImageGrab
+
 if __name__ == "__main__":
-    # Ensure GEMINI_API_KEY is set in environment
-    agent = DesktopSidekickAgent()
+    screenshot_path = "temp_screen.png"
+    
+    # Grab the active display screen and save
+    screenshot = ImageGrab.grab()
+    screenshot.save(screenshot_path)
 
-    # Simulate an evaluation cycle
-    # output = agent.analyze_frame(
-    #     image_path="temp_screen.png",
-    #     mouse_active=True,
-    #     current_timestamp="14:02:15",
-    #     user_message=None
-    # )
-    # print("Reaction:", output.reaction)
-    # print("Speech:", output.bubble_speech)
+    result = get_sidekick_response(
+        image_path=screenshot_path,
+        mouse_active=False,
+        current_timestamp="14:30:00",
+        memory_queue=["[14:25:00] User opened VS Code to work on the parser."],
+        user_message="Why is this segfaulting?"
+    )
+
+    print(f"Model used:     {DEFAULT_MODEL}")
+    print("Classification:", result.status_classification)
+    print("Reaction:      ", result.reaction)
+    print("Bubble Speech: ", result.bubble_speech)
+    print("Activities:    ", result.detected_activities)
+    print("Summary Entry: ", result.session_summary_entry)
