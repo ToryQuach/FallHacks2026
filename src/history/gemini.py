@@ -1,14 +1,19 @@
-import os
+import io
 import json
+import os
+import time
 from pathlib import Path
 from typing import List, Literal, Optional
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field
 from google import genai
-from google.genai import types
+from google.genai import errors, types
+from PIL import Image, ImageGrab
+from pydantic import BaseModel, Field
+
+from history import HistoryQueue
 
 # ---------------------------------------------------------------------------
-# Step 1: Read GEMINI_API_KEY & Model Config from .env
+# Step 1: Configuration & Client Setup
 # ---------------------------------------------------------------------------
 load_dotenv()
 
@@ -16,14 +21,15 @@ api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise ValueError("GEMINI_API_KEY not found in .env file or environment.")
 
-# Default to Gemma 4 (falls back to gemma-4-31b-it or whatever you specify in .env)
-DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemma-4-31b-it")
+# gemini-3.5-flash-lite offers fast inference and high availability
+DEFAULT_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+FALLBACK_MODEL = "gemini-3.8-flash"
 
 client = genai.Client(api_key=api_key)
 
 
 # ---------------------------------------------------------------------------
-# Schema Definition
+# Step 2: Schema Definition
 # ---------------------------------------------------------------------------
 class SidekickResponse(BaseModel):
     status_classification: Literal["FOCUSING", "STRUGGLING", "DISTRACTED", "CELEBRATING"] = Field(
@@ -46,7 +52,7 @@ class SidekickResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Build the Personality and Goal
+# Step 3: Persona and Goal
 # ---------------------------------------------------------------------------
 def load_text_or_default(filepath: str, default: str) -> str:
     path = Path(filepath)
@@ -85,26 +91,38 @@ Rules:
 """
 
 
+def get_optimized_image_bytes(image_path: str, max_dim: int = 1280) -> bytes:
+    """Downscales and compresses screenshots to keep network latency under 200ms."""
+    with Image.open(image_path) as img:
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        img.thumbnail((max_dim, max_dim), Image.Resampling.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=75, optimize=True)
+        return buf.getvalue()
+
+
 # ---------------------------------------------------------------------------
-# Step 3: Get the Response Using Current Method (Default: Gemma)
+# Step 4: Robust API Execution with History Integration
 # ---------------------------------------------------------------------------
 def get_sidekick_response(
     image_path: str,
     mouse_active: bool,
     current_timestamp: str,
-    memory_queue: Optional[List[str]] = None,
+    history_queue: Optional[HistoryQueue] = None,
     user_message: Optional[str] = None,
     model_name: str = DEFAULT_MODEL
 ) -> SidekickResponse:
-    # 1. Package the screenshot
-    image_bytes = Path(image_path).read_bytes()
-    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/png")
+    # 1. Compress screenshot
+    image_bytes = get_optimized_image_bytes(image_path)
+    image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
 
-    # 2. Package telemetry & context
+    # 2. Package telemetry via history_queue.form_json()
+    rolling_history = history_queue.form_json() if history_queue else []
     state_payload = {
         "timestamp": current_timestamp,
         "mouse_active": mouse_active,
-        "rolling_history": memory_queue or [],
+        "rolling_history": rolling_history,
         "user_direct_input": user_message or "None (Passive Monitoring)"
     }
 
@@ -113,49 +131,100 @@ def get_sidekick_response(
         "Evaluate the screenshot against session goals and respond via the schema."
     )
 
-    # 3. Call the API with structured output schema
-    response = client.models.generate_content(
-        model=model_name,
-        contents=[prompt_text, image_part],
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            response_mime_type="application/json",
-            response_schema=SidekickResponse,
-            temperature=0.4,
-        ),
+    # 3. Fast generation config
+    config = types.GenerateContentConfig(
+        system_instruction=system_instruction,
+        response_mime_type="application/json",
+        response_schema=SidekickResponse,
+        temperature=0.3,
+        thinking_config=types.ThinkingConfig(thinking_level="low"),
     )
 
-    # Direct parsed object or string fallback parsing
-    if hasattr(response, "parsed") and isinstance(response.parsed, SidekickResponse):
-        return response.parsed
+    models_to_try = [model_name]
+    if model_name != FALLBACK_MODEL:
+        models_to_try.append(FALLBACK_MODEL)
 
-    raw_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
-    return SidekickResponse.model_validate_json(raw_text)
+    response = None
+    last_err = None
+
+    for target_model in models_to_try:
+        for attempt in range(2):
+            try:
+                response = client.models.generate_content(
+                    model=target_model,
+                    contents=[prompt_text, image_part],
+                    config=config,
+                )
+                break
+            except errors.ServerError as e:
+                last_err = e
+                time.sleep(1.5)
+            except Exception as e:
+                last_err = e
+                break
+
+        if response is not None:
+            break
+
+    if response is None:
+        raise RuntimeError(f"All model attempts failed with: {last_err}")
+
+    # Parse Pydantic object
+    if hasattr(response, "parsed") and isinstance(response.parsed, SidekickResponse):
+        result_data = response.parsed
+    else:
+        raw_text = response.text.strip().removeprefix("```json").removesuffix("```").strip()
+        result_data = SidekickResponse.model_validate_json(raw_text)
+
+    # 4. Append the response summary into history queue
+    if history_queue is not None:
+        history_queue.append(
+            timestamp=current_timestamp,
+            entry=result_data.session_summary_entry
+        )
+
+    return result_data
 
 
 # ---------------------------------------------------------------------------
 # Execution
 # ---------------------------------------------------------------------------
-from PIL import ImageGrab
-
 if __name__ == "__main__":
     screenshot_path = "temp_screen.png"
-    
-    # Grab the active display screen and save
-    screenshot = ImageGrab.grab()
-    screenshot.save(screenshot_path)
 
+    # Capture live screen if not present
+    if not Path(screenshot_path).exists():
+        screenshot = ImageGrab.grab()
+        screenshot.save(screenshot_path)
+
+    # Initialize history queue with initial events
+    history = HistoryQueue(max_size=5)
+    history.append(
+        timestamp="14:25:00",
+        entry="User opened VS Code to work on the parser."
+    )
+    history.append(
+        timestamp="14:26:30",
+        entry="Compiler threw segmentation fault in line 42."
+    )
+
+    current_ts = "14:30:00"
+    start_time = time.time()
     result = get_sidekick_response(
         image_path=screenshot_path,
         mouse_active=False,
-        current_timestamp="14:30:00",
-        memory_queue=["[14:25:00] User opened VS Code to work on the parser."],
+        current_timestamp=current_ts,
+        history_queue=history,
         user_message="Why is this segfaulting?"
     )
+    elapsed = time.time() - start_time
 
-    print(f"Model used:     {DEFAULT_MODEL}")
+    print(f"\n[Finished in {elapsed:.2f}s]")
     print("Classification:", result.status_classification)
     print("Reaction:      ", result.reaction)
     print("Bubble Speech: ", result.bubble_speech)
     print("Activities:    ", result.detected_activities)
     print("Summary Entry: ", result.session_summary_entry)
+
+    print("\n--- Full History Queue Contents ---")
+    print(history.form_json(as_string=True))
