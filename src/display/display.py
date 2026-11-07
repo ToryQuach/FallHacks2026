@@ -180,6 +180,15 @@ GetSystemMetrics.restype = ct.c_int
 SetForegroundWindow = user32.SetForegroundWindow
 SetForegroundWindow.argtypes = HWND,
 SetForegroundWindow.restype = BOOL
+SetCapture = user32.SetCapture
+SetCapture.argtypes = HWND,
+SetCapture.restype = HWND
+ReleaseCapture = user32.ReleaseCapture
+ReleaseCapture.argtypes = ()
+ReleaseCapture.restype = BOOL
+SetCursor = user32.SetCursor
+SetCursor.argtypes = HCURSOR,
+SetCursor.restype = HCURSOR
 SetProcessDPIAware = user32.SetProcessDPIAware
 SetProcessDPIAware.argtypes = ()
 SetProcessDPIAware.restype = BOOL
@@ -292,6 +301,7 @@ WS_POPUP = 0x80000000
 assert WS_POPUP == 0x80000000
 
 WS_EX_LAYERED = 0x00080000
+WS_EX_TOPMOST = 0x00000008
 ULW_ALPHA = 0x00000002
 AC_SRC_OVER = 0x00
 AC_SRC_ALPHA = 0x01
@@ -306,23 +316,43 @@ CS_HREDRAW = 2
 CS_VREDRAW = 1
 
 IDC_ARROW = MAKEINTRESOURCE(32512)
+IDC_SIZEALL = MAKEINTRESOURCE(32646)
 
 SW_SHOWNORMAL = 1
 
 WM_PAINT = 15
 WM_DESTROY = 2
 WM_KEYDOWN = 0x0100
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
+WM_CAPTURECHANGED = 0x0215
 VK_ESCAPE = 0x1B
 DT_SINGLELINE = 32
 DT_CENTER = 1
 DT_VCENTER = 4
 
+# ------------------------------- tweaks ----------------------------------
 # Sprites are 1336x948 PNGs; draw them at this fraction of natural size.
-MASCOT_SCALE = 0.5
+# 0.25 = small, 0.5 = half size, 1.0 = full size.
+MASCOT_SCALE = 0.35
+# -------------------------------------------------------------------------
 INTERPOLATION_HIGH_QUALITY_BICUBIC = 7
 
 mascot = None
-spriteCache = {}  # PNG path -> GDI+ bitmap handle
+currentSprite = None  # sprite path currently on screen
+spriteCache = {}      # PNG path -> GDI+ bitmap handle
+
+# Where the sprite sits in window coordinates.
+mascotX = 0
+mascotY = 0
+
+# Drag state, in window coordinates.
+dragging = False
+dragStartX = 0
+dragStartY = 0
+dragMascotX = 0
+dragMascotY = 0
 
 # Per-pixel-alpha surface the layered window is composed from.
 surfaceBitmap = None
@@ -342,19 +372,25 @@ def loadSprite(path):
     spriteCache[path] = bitmap
     return bitmap
 
-def drawSprite(hdc, path, rect):
-    """Draw one sprite centered in rect, scaled by MASCOT_SCALE."""
-    bitmap = loadSprite(path)
+def GET_X_LPARAM(lParam):
+    return ct.c_short(lParam & 0xFFFF).value
 
+def GET_Y_LPARAM(lParam):
+    return ct.c_short((lParam >> 16) & 0xFFFF).value
+
+def mascotSize(path):
+    """On-screen size of one sprite after MASCOT_SCALE."""
+    bitmap = loadSprite(path)
     width = UINT()
     height = UINT()
     GdipGetImageWidth(bitmap, ct.byref(width))
     GdipGetImageHeight(bitmap, ct.byref(height))
+    return int(width.value * MASCOT_SCALE), int(height.value * MASCOT_SCALE)
 
-    drawW = int(width.value * MASCOT_SCALE)
-    drawH = int(height.value * MASCOT_SCALE)
-    x = (rect.right - rect.left - drawW) // 2
-    y = (rect.bottom - rect.top - drawH) // 2
+def drawSprite(hdc, path, x, y):
+    """Draw one sprite at (x, y), scaled by MASCOT_SCALE."""
+    bitmap = loadSprite(path)
+    drawW, drawH = mascotSize(path)
 
     graphics = ct.c_void_p()
     GdipCreateFromHDC(hdc, ct.byref(graphics))
@@ -378,12 +414,23 @@ def createSurface(width, height):
     SelectObject(dc, dib)
     return dib, dc, bits
 
+def moveMascot(x, y):
+    """Move the sprite, keeping it fully on screen. Returns True if it moved."""
+    global mascotX, mascotY
+    drawW, drawH = mascotSize(currentSprite)
+    x = min(max(x, 0), max(0, surfaceWidth - drawW))
+    y = min(max(y, 0), max(0, surfaceHeight - drawH))
+    if (x, y) == (mascotX, mascotY):
+        return False
+    mascotX, mascotY = x, y
+    return True
+
 def present(hwnd):
-    """Render the next frame into the alpha surface and compose it on screen."""
+    """Render the current frame into the alpha surface and compose it on screen."""
     # Clear to transparent; the sprite supplies every visible pixel, so its
     # soft edges blend against nothing and no background color can bleed in.
     ct.memset(surfaceBits, 0, surfaceWidth * surfaceHeight * 4)
-    drawSprite(surfaceDC, mascot.getNextImage(), RECT(0, 0, surfaceWidth, surfaceHeight))
+    drawSprite(surfaceDC, currentSprite, mascotX, mascotY)
     GdiFlush()  # make sure every batched GDI call landed in the DIB
 
     size = SIZE(surfaceWidth, surfaceHeight)
@@ -393,7 +440,8 @@ def present(hwnd):
                         ct.byref(src), 0, ct.byref(blend), ULW_ALPHA)
 
 def MainWin():
-    global mascot, surfaceBitmap, surfaceDC, surfaceBits, surfaceWidth, surfaceHeight
+    global mascot, currentSprite, mascotX, mascotY
+    global surfaceBitmap, surfaceDC, surfaceBits, surfaceWidth, surfaceHeight
 
     # Opt into per-monitor DPI so the text stays crisp on scaled displays.
     SetProcessDPIAware()
@@ -423,13 +471,14 @@ def MainWin():
     # Register Window Class
     RegisterClass(ct.byref(wndclass))
 
-    # Create Window. WS_EX_LAYERED is required for UpdateLayeredWindow.
+    # Create Window. WS_EX_LAYERED is required for UpdateLayeredWindow;
+    # WS_EX_TOPMOST pins the mascot above every other window.
     # WS_POPUP + screen-sized rect = borderless fullscreen. Swap WS_POPUP for
     # WS_OVERLAPPEDWINDOW (and the rect for CW_USEDEFAULT) for a normal window.
     screen_w = GetSystemMetrics(SM_CXSCREEN)
     screen_h = GetSystemMetrics(SM_CYSCREEN)
 
-    hwnd = CreateWindowEx(WS_EX_LAYERED,
+    hwnd = CreateWindowEx(WS_EX_LAYERED | WS_EX_TOPMOST,
                           wndclass.lpszClassName,
                           'Python Window',
                           WS_POPUP,
@@ -446,6 +495,12 @@ def MainWin():
     # art, so edges stay clean instead of picking up a background color.
     surfaceBitmap, surfaceDC, surfaceBits = createSurface(screen_w, screen_h)
     surfaceWidth, surfaceHeight = screen_w, screen_h
+
+    # Start with the sprite centered on screen.
+    currentSprite = mascot.getNextImage()
+    drawW, drawH = mascotSize(currentSprite)
+    mascotX = (surfaceWidth - drawW) // 2
+    mascotY = (surfaceHeight - drawH) // 2
     present(hwnd)
 
     # Show Window
@@ -469,14 +524,41 @@ def MainWin():
     return msg.wParam
 
 def WndProc(hwnd, message, wParam, lParam):
+    global currentSprite, dragging
+    global dragStartX, dragStartY, dragMascotX, dragMascotY
+
     ps = PAINTSTRUCT()
 
     if message == WM_PAINT:
         # The window has no GDI content; validate the update region and
         # re-compose the layered surface (this also advances the frame).
         BeginPaint(hwnd, ct.byref(ps))
+        currentSprite = mascot.getNextImage()
         present(hwnd)
         EndPaint(hwnd, ct.byref(ps))
+        return 0
+    elif message == WM_LBUTTONDOWN:
+        # Per-pixel alpha means this only fires over the mascot itself.
+        SetCapture(hwnd)
+        dragging = True
+        dragStartX = GET_X_LPARAM(lParam)
+        dragStartY = GET_Y_LPARAM(lParam)
+        dragMascotX = mascotX
+        dragMascotY = mascotY
+        return 0
+    elif message == WM_MOUSEMOVE and dragging:
+        SetCursor(LoadCursor(None, IDC_SIZEALL))
+        if moveMascot(dragMascotX + GET_X_LPARAM(lParam) - dragStartX,
+                      dragMascotY + GET_Y_LPARAM(lParam) - dragStartY):
+            present(hwnd)
+        return 0
+    elif message == WM_LBUTTONUP:
+        if dragging:
+            dragging = False
+            ReleaseCapture()
+        return 0
+    elif message == WM_CAPTURECHANGED:
+        dragging = False
         return 0
     elif message == WM_KEYDOWN and wParam == VK_ESCAPE:
         PostQuitMessage(0)
