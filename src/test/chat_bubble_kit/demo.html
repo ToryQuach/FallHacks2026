@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Bubble demo</title>
+<style>
+body{font:16px/1.4 system-ui;padding:40px;background:#fff;max-width:520px}
+.bubble{position:relative;display:inline-block;max-width:100%;margin:0 0 56px 16px;
+  padding:6px 8px;border:14px solid transparent;border-image-width:30px;border-image-outset:16px;
+  border-image-slice:60 fill;                 /* 2x sheet: 30px slice * 2 */
+  border-image-source:url(green/bubble_green_9slice@2x.png)}
+.bubble.blue{border-image-source:url(blue/bubble_blue_9slice@2x.png)}
+.bubble::after{content:"";position:absolute;left:24px;top:calc(100% + 16px - 5px);width:44px;height:36px;
+  background:url(green/tail_left_green@2x.png) 0 0/100% 100% no-repeat}
+.bubble.blue::after{background-image:url(blue/tail_left_blue@2x.png)}
+</style>
+<div class="bubble">Hi!</div><br>
+<div class="bubble blue">This bubble grows with the text, and the corners never distort. Add as many lines as you like.</div>
