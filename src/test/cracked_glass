@@ -1,0 +1,263 @@
+import argparse
+import math
+import random
+import sys
+ 
+ANGRY = "angry"
+KEY = "#ff00fe"          # transparent colour key (never used for drawing)
+INK = "#111111"          # crack colour
+SHINE = "#e6f3ff"        # thin glass highlight next to each crack
+ 
+ 
+# --------------------------------------------------------------------------- #
+# Crack geometry (pure Python, no GUI -> easy to test)
+# --------------------------------------------------------------------------- #
+def generate_cracks(w, h, impact, seed=None):
+    """Return a list of segments (x1, y1, x2, y2, dist_from_impact, width),
+    sorted by dist so they can be revealed outward from the impact point."""
+    rnd = random.Random(seed)
+    cx, cy = impact
+    far = max(math.hypot(cx - x, cy - y) for x in (0, w) for y in (0, h))
+    segs = []
+    spokes = []  # polyline of each main crack, for the web rings
+ 
+    def walk(x, y, ang, length, width, depth, record=None):
+        travelled = 0.0
+        pts = [(x, y)]
+        while travelled < length:
+            step = rnd.uniform(22, 55)
+            ang += rnd.uniform(-0.2, 0.2)
+            nx, ny = x + math.cos(ang) * step, y + math.sin(ang) * step
+            wd = max(1.2, width * (1 - 0.55 * travelled / length))
+            segs.append((x, y, nx, ny, math.hypot(x - cx, y - cy), wd))
+            x, y, travelled = nx, ny, travelled + step
+            pts.append((x, y))
+            if depth < 2 and rnd.random() < 0.13:
+                side = rnd.choice((-1, 1))
+                walk(x, y, ang + side * rnd.uniform(0.4, 0.95),
+                     rnd.uniform(0.08, 0.3) * (length - travelled + 80),
+                     wd * 0.65, depth + 1)
+            if not (-80 < x < w + 80 and -80 < y < h + 80):
+                break
+        if record is not None:
+            record.extend(pts)
+ 
+    n_main = rnd.randint(11, 15)
+    base = rnd.uniform(0, math.tau)
+    for i in range(n_main):
+        ang = base + i * math.tau / n_main + rnd.uniform(-0.18, 0.18)
+        pts = []
+        walk(cx, cy, ang, far * rnd.uniform(0.8, 1.2), 5.0, 0, pts)
+        spokes.append(pts)
+ 
+    # concentric web: join neighbouring spokes at a few radii with jagged lines
+    for r in (95, 175, 290, 440, 640, 880):
+        ring = []
+        for pts in spokes:
+            best = min(pts, key=lambda p: abs(math.hypot(p[0] - cx, p[1] - cy) - r))
+            ring.append(best if abs(math.hypot(best[0] - cx, best[1] - cy) - r) < 70 else None)
+        for a, b in zip(ring, ring[1:] + ring[:1]):
+            if a is None or b is None or rnd.random() < 0.3:
+                continue
+            x, y = a
+            for k in range(1, 4):
+                t = k / 3
+                nx = a[0] + (b[0] - a[0]) * t + (rnd.uniform(-9, 9) if k < 3 else 0)
+                ny = a[1] + (b[1] - a[1]) * t + (rnd.uniform(-9, 9) if k < 3 else 0)
+                segs.append((x, y, nx, ny, float(r), 1.4))
+                x, y = nx, ny
+ 
+    segs.sort(key=lambda s: s[4])
+    return segs
+ 
+ 
+# --------------------------------------------------------------------------- #
+# Overlay window
+# --------------------------------------------------------------------------- #
+def _enable_dpi_awareness():
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception:
+        pass
+ 
+ 
+def _make_click_through(win):
+    try:
+        import ctypes
+        win.update_idletasks()
+        user32 = ctypes.windll.user32
+        hwnd = user32.GetParent(win.winfo_id()) or win.winfo_id()
+        GWL_EXSTYLE = -20
+        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        # layered | transparent (click-through) | toolwindow (no taskbar button)
+        user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | 0x80000 | 0x20 | 0x80)
+    except Exception:
+        pass
+ 
+ 
+def _ease_out(t):
+    return 1 - (1 - t) ** 2
+ 
+ 
+class ScreenCrack:
+    TICK_MS = 16
+ 
+    def __init__(self, master=None):
+        import tkinter as tk
+        self._tk = tk
+        self._own_root = master is None
+        if self._own_root:
+            _enable_dpi_awareness()
+            self.master = tk.Tk()
+            self.master.withdraw()
+        else:
+            self.master = master
+        self.playing = False
+ 
+    def play(self, impact=None, hold=2.5, on_done=None, seed=None):
+        """Kick + crack the whole screen once. `impact` = (x, y) in screen pixels."""
+        if self.playing:
+            return
+        tk = self._tk
+        self.playing = True
+        win = tk.Toplevel(self.master)
+        w, h = win.winfo_screenwidth(), win.winfo_screenheight()
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.geometry(f"{w}x{h}+0+0")
+        win.configure(bg=KEY)
+        try:
+            win.attributes("-transparentcolor", KEY)
+        except tk.TclError:
+            win.destroy()
+            self.playing = False
+            print("Transparent overlay isn't supported on this OS (Windows only).",
+                  file=sys.stderr)
+            return
+        canvas = tk.Canvas(win, width=w, height=h, bg=KEY, highlightthickness=0)
+        canvas.pack()
+        _make_click_through(win)
+ 
+        rnd = random.Random(seed)
+        if impact is None:
+            impact = (rnd.uniform(0.3, 0.7) * w, rnd.uniform(0.3, 0.7) * h)
+        cx, cy = impact
+        segs = generate_cracks(w, h, impact, seed)
+        far = max(s[4] for s in segs) + 120
+ 
+        # hidden crack lines: a pale highlight under a dark line
+        items = []
+        for x1, y1, x2, y2, _d, wd in segs:
+            a = canvas.create_line(x1 + 1.5, y1 + 1.5, x2 + 1.5, y2 + 1.5, fill=SHINE,
+                                   width=max(1, wd * 0.6), state="hidden")
+            b = canvas.create_line(x1, y1, x2, y2, fill=INK, width=wd,
+                                   capstyle="round", state="hidden")
+            items.append((a, b))
+ 
+        # foot + starburst at the impact point
+        burst = self._starburst(canvas, cx, cy, rnd)
+        foot = self._foot(canvas, cx, cy)
+ 
+        T_REVEAL, T_FADE = 1.0, 0.8
+        state = {"t": 0.0, "shown": 0}
+ 
+        def show_upto(n):
+            n = max(0, min(len(items), n))
+            while state["shown"] < n:
+                for i in items[state["shown"]]:
+                    canvas.itemconfigure(i, state="normal")
+                state["shown"] += 1
+            while state["shown"] > n:
+                state["shown"] -= 1
+                for i in items[state["shown"]]:
+                    canvas.itemconfigure(i, state="hidden")
+ 
+        def tick():
+            t = state["t"]
+            if t < T_REVEAL:                                   # cracks spread outward
+                front = _ease_out(t / T_REVEAL) * far
+                n = state["shown"]
+                while n < len(segs) and segs[n][4] <= front:
+                    n += 1
+                show_upto(n)
+            elif t < T_REVEAL + hold:                          # hold the cracked look
+                show_upto(len(items))
+            elif t < T_REVEAL + hold + T_FADE:                 # cracks retract
+                if state["shown"] == len(items):
+                    canvas.delete(*burst, *foot)
+                k = (t - T_REVEAL - hold) / T_FADE
+                show_upto(int(len(items) * (1 - k)))
+            else:
+                win.destroy()
+                self.playing = False
+                if on_done:
+                    on_done()
+                return
+            state["t"] += self.TICK_MS / 1000
+            win.after(self.TICK_MS, tick)
+ 
+        tick()
+ 
+    # -- small drawing helpers ------------------------------------------------ #
+    @staticmethod
+    def _starburst(canvas, cx, cy, rnd):
+        pts = []
+        n = 16
+        for i in range(n * 2):
+            r = (95 if i % 2 == 0 else 48) * rnd.uniform(0.85, 1.1)
+            a = i * math.pi / n
+            pts += [cx + math.cos(a) * r, cy + math.sin(a) * r]
+        return [canvas.create_polygon(pts, fill="#efe8a0", outline=INK, width=3)]
+ 
+    @staticmethod
+    def _foot(canvas, cx, cy):
+        ang = math.radians(10)
+        ca, sa = math.cos(ang), math.sin(ang)
+ 
+        def rot(x, y):
+            return cx + x * ca - y * sa, cy + x * sa + y * ca
+ 
+        body = [rot(-34, -44), rot(34, -44), rot(34, 44), rot(-34, 44)]
+        flat = [c for p in body for c in p]
+        foot = canvas.create_polygon(flat, fill="#fcfcf4", outline=INK, width=5,
+                                     joinstyle="round")
+        x1, y1 = rot(-34, 26)
+        x2, y2 = rot(34, 26)
+        band = canvas.create_line(x1, y1, x2, y2, fill=INK, width=4)
+        return [foot, band]
+ 
+    def mainloop(self):
+        self.master.mainloop()
+ 
+ 
+# --------------------------------------------------------------------------- #
+# The trigger: ONLY reacts to the angry state
+# --------------------------------------------------------------------------- #
+class AngryKickTrigger:
+    """Call set_state() whenever the pet's mood changes. Only "angry" does anything."""
+ 
+    def __init__(self, crack, hold=2.5):
+        self.crack = crack
+        self.hold = hold
+        self.state = None
+ 
+    def set_state(self, state, pos=None, on_done=None):
+        entered_angry = state == ANGRY and self.state != ANGRY
+        self.state = state
+        if entered_angry:
+            self.crack.play(impact=pos, hold=self.hold, on_done=on_done)
+ 
+ 
+if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Demo: trigger the angry kick once.")
+    ap.add_argument("--delay", type=float, default=2.0, help="seconds before it triggers")
+    ap.add_argument("--hold", type=float, default=2.5, help="seconds the cracks stay")
+    a = ap.parse_args()
+ 
+    crack = ScreenCrack()
+    trigger = AngryKickTrigger(crack, hold=a.hold)
+    print(f"Kicking your screen in {a.delay:g}s...")
+    crack.master.after(int(a.delay * 1000),
+                       lambda: trigger.set_state(ANGRY, on_done=crack.master.destroy))
+    crack.mainloop()
