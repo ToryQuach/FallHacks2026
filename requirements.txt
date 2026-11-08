@@ -5,3 +5,6 @@ pillow
 pynput
 pyautogui
 jeepney; sys_platform == "linux"
+PyQt6
+pyttsx3
+kokoro-onnx

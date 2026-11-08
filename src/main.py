@@ -9,11 +9,16 @@ sys.path.extend([
     os.path.join(_SRC_DIR, "display"),
     os.path.join(_SRC_DIR, "gemini"),
     os.path.join(_SRC_DIR, "menu"),
+    os.path.join(_SRC_DIR, "tts"),
 ])
 
 from display import MascotDisplay
 from menu import menu
 from pipeline import run_gemini_pipeline
+import tts
+
+# Read the sidekick's lines aloud
+TTS_ENABLED = True
 
 
 def main():
@@ -38,8 +43,13 @@ def main():
   # Pass onPoke callback to MascotDisplay
   display_app = MascotDisplay(onSubmit=handle_submit, onPoke=handle_poke)
 
+  if TTS_ENABLED:
+    tts.warm_up()
+
   def on_sidekick_speak(text: str, reaction: str):
     display_app.ai_response_signal.emit(text, reaction)
+    if TTS_ENABLED:
+      tts.speak(text, config.get("personality"))
 
   pipeline_thread = threading.Thread(
       target=run_gemini_pipeline,
