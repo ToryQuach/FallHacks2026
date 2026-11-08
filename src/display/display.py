@@ -350,7 +350,7 @@ class MascotDisplay(QWidget):
     if not self.bubbleText:
       return QRect()
     metrics = QFontMetrics(self.bubbleFont)
-    max_bubble_w = 260
+    max_bubble_w = 300
     wrapped = self._wrapLines(self.bubbleText, max_bubble_w - 20)
     bubble_w = min(
         max_bubble_w, max([metrics.horizontalAdvance(line) for line in wrapped] + [120]) + 24
