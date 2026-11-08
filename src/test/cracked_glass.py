@@ -1,9 +1,8 @@
-import argparse
 import math
 import sys
 
 from PyQt6.QtCore import QPointF, Qt, QTimer, pyqtSignal
-from PyQt6.QtGui import QColor, QCursor, QPainter, QPen, QPolygonF
+from PyQt6.QtGui import QColor, QPainter, QPen, QPolygonF
 from PyQt6.QtWidgets import QApplication, QWidget
 
 INK = QColor("#111111")          # crack colour
@@ -36,7 +35,7 @@ def _j(*keys):
 # --------------------------------------------------------------------------- #
 # Crack geometry (pure Python, no GUI -> easy to test)
 # --------------------------------------------------------------------------- #
-def generate_cracks(w, h, impact):
+def _generate_cracks(w, h, impact):
     """Return a list of segments (x1, y1, x2, y2, dist_from_impact, width),
     sorted by dist so they can be revealed outward from the impact point."""
     cx, cy = impact
@@ -94,88 +93,19 @@ def generate_cracks(w, h, impact):
     return segs
 
 
-# --------------------------------------------------------------------------- #
-# Choosing where the crack starts
-# --------------------------------------------------------------------------- #
-ANCHORS = {
-    "center": (0.5, 0.5),
-    "top": (0.5, 0.12), "bottom": (0.5, 0.88),
-    "left": (0.12, 0.5), "right": (0.88, 0.5),
-    "top-left": (0.12, 0.12), "top-right": (0.88, 0.12),
-    "bottom-left": (0.12, 0.88), "bottom-right": (0.88, 0.88),
-}
-
-
-def resolve_impact(spec, w, h, pointer=None):
-    """Turn an impact spec into pixel coordinates (x, y).
-
-    spec can be: (960, 540) pixels | (0.25, 0.7) fractions of the window |
-    "center" / "top-left" / ... | "cursor" | a function returning one of those |
-    None (= centre of the window)."""
-    if callable(spec):
-        spec = spec()
-    if spec is None:
-        x, y = 0.5 * w, 0.5 * h          # default: centre of the window
-    elif isinstance(spec, str):
-        key = spec.strip().lower().replace("_", "-").replace(" ", "-")
-        if key == "cursor":
-            if pointer is None:
-                raise ValueError("'cursor' needs a pointer position")
-            x, y = pointer
-        elif key in ANCHORS:
-            fx, fy = ANCHORS[key]
-            x, y = fx * w, fy * h
-        else:
-            raise ValueError(f"unknown impact {spec!r}; try one of "
-                             f"{sorted(ANCHORS) + ['cursor']}")
-    else:
-        a, b = spec
-        if isinstance(a, float) and isinstance(b, float) and 0 <= a <= 1 and 0 <= b <= 1:
-            x, y = a * w, b * h          # fractions of the window
-        else:
-            x, y = a, b                  # pixels
-    return (min(max(float(x), 0.0), w), min(max(float(y), 0.0), h))
-
-
-def parse_impact_arg(text):
-    """Command-line form: 'center', 'cursor', '500,300' (pixels) or '0.8,0.2' (fractions)."""
-    text = text.strip()
-    if "," not in text:
-        return text
-    a, b = (p.strip() for p in text.split(",", 1))
-    if "." in a or "." in b:
-        return (float(a), float(b))
-    return (int(a), int(b))
-
-
 def _ease_out(t):
     return 1 - (1 - t) ** 2
 
 
 # --------------------------------------------------------------------------- #
-# The effect
+# The effect (one hidden overlay per window, managed by the function below)
 # --------------------------------------------------------------------------- #
-class CrackedGlass(QWidget):
-    """A kick-and-crack effect that plays inside the window you give it.
-
-        glass = CrackedGlass(window)
-        glass.play(impact="center")          # returns immediately
-
-    It is a transparent child of `window`, sits on top of its other widgets,
-    ignores the mouse, and hides itself again when the animation finishes.
-    `impact` / `foot_start` accept pixels, fractions, names like "center" or
-    "cursor" (see resolve_impact). Connect to `finished` or pass `on_done`.
-    """
-
-    finished = pyqtSignal()
-
+class _CrackedGlass(QWidget):
     TICK_MS = 16
     T_REVEAL = 1.0
     T_FADE = 0.8
 
     def __init__(self, window):
-        if not isinstance(window, QWidget):
-            raise TypeError("CrackedGlass needs a PyQt6 QWidget window")
         super().__init__(window)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.setGeometry(window.rect())
@@ -186,51 +116,36 @@ class CrackedGlass(QWidget):
         self._on_done = None
         self._lines = []
         self._burst = QPolygonF()
+        self._impact = (0.0, 0.0)
+        self._far = 0.0
         self._t = 0.0
-        self._kick_secs = 0.0
         self._shown = 0
-        self._fx = self._fy = 0.0
-        self._start = self._impact = (0.0, 0.0)
-        self._landed = True
-        self._burst_on = False
-        self._foot_on = False
+        self._marks_on = False
 
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.PreciseTimer)
         self._timer.setInterval(self.TICK_MS)
         self._timer.timeout.connect(self._tick)
 
-    # -- public --------------------------------------------------------------- #
-    def play(self, impact="center", hold=2.5, foot_start=None, kick_secs=0.18,
-             on_done=None):
-        """Play the kick + crack once. `foot_start` is where the foot lunges from
-        (it lands on `impact` after `kick_secs`); `hold` is how long the cracks stay."""
+    def play(self, x, y, hold=2.5, on_done=None):
         if self.playing:
             return
 
         parent = self.parentWidget()
         if parent is None:
-            raise RuntimeError("CrackedGlass has no window to play in")
+            raise RuntimeError("the effect has no window to play in")
 
         self.setGeometry(parent.rect())
         self.raise_()
         self.show()
 
         w, h = self.width(), self.height()
-        cursor = self.mapFromGlobal(QCursor.pos())
-        pointer = (cursor.x(), cursor.y())
-
-        self._impact = resolve_impact(impact, w, h, pointer=pointer)
-        self._start = (self._impact if foot_start is None
-                       else resolve_impact(foot_start, w, h, pointer=pointer))
+        self._impact = (min(max(float(x), 0.0), float(w)),
+                        min(max(float(y), 0.0), float(h)))
         self._hold = hold
         self._on_done = on_done
 
-        cx, cy = self._impact
-        sx, sy = self._start
-        self._kick_secs = kick_secs if math.hypot(sx - cx, sy - cy) > 1 else 0.0
-
-        segs = generate_cracks(w, h, self._impact)
+        segs = _generate_cracks(w, h, self._impact)
         self._far = max(s[4] for s in segs) + 120
 
         # Pre-build pens/points so paintEvent() only has to draw.
@@ -247,62 +162,42 @@ class CrackedGlass(QWidget):
             ))
 
         self._burst = self._starburst(self._impact)
-        self._t = -self._kick_secs
+        self._t = 0.0
         self._shown = 0
-        self._fx, self._fy = sx, sy
-        self._landed = self._kick_secs == 0.0
-        self._burst_on = False
-        self._foot_on = True
+        self._marks_on = True
 
         self.playing = True
         self.update()
         self._timer.start()
 
-    # -- animation ------------------------------------------------------------ #
     def _tick(self):
         t = self._t
         changed = False
 
-        if t < 0:                                              # foot lunges to the impact
-            p = ((t + self._kick_secs) / self._kick_secs) ** 2  # accelerate into the hit
-            sx, sy = self._start
-            cx, cy = self._impact
-            self._fx, self._fy = sx + (cx - sx) * p, sy + (cy - sy) * p
-            changed = True
+        if t < self.T_REVEAL:                                   # cracks spread outward
+            front = _ease_out(t / self.T_REVEAL) * self._far
+            n = self._shown
+            while n < len(self._lines) and self._lines[n][0] <= front:
+                n += 1
+            if n != self._shown:
+                self._shown = n
+                changed = True
+        elif t < self.T_REVEAL + self._hold:                    # hold the cracked look
+            if self._shown != len(self._lines):
+                self._shown = len(self._lines)
+                changed = True
+        elif t < self.T_REVEAL + self._hold + self.T_FADE:      # cracks retract
+            if self._marks_on:
+                self._marks_on = False
+                changed = True
+            k = (t - self.T_REVEAL - self._hold) / self.T_FADE
+            n = int(len(self._lines) * (1 - k))
+            if n != self._shown:
+                self._shown = n
+                changed = True
         else:
-            if not self._landed:                                # landed: snap onto the impact
-                self._fx, self._fy = self._impact
-                self._landed = True
-                changed = True
-            if not self._burst_on:                              # show the starburst on contact
-                self._burst_on = True
-                changed = True
-
-            if t < self.T_REVEAL:                               # cracks spread outward
-                front = _ease_out(t / self.T_REVEAL) * self._far
-                n = self._shown
-                while n < len(self._lines) and self._lines[n][0] <= front:
-                    n += 1
-                if n != self._shown:
-                    self._shown = n
-                    changed = True
-            elif t < self.T_REVEAL + self._hold:                # hold the cracked look
-                if self._shown != len(self._lines):
-                    self._shown = len(self._lines)
-                    changed = True
-            elif t < self.T_REVEAL + self._hold + self.T_FADE:  # cracks retract
-                if self._shown == len(self._lines) and (self._burst_on or self._foot_on):
-                    self._burst_on = False
-                    self._foot_on = False
-                    changed = True
-                k = (t - self.T_REVEAL - self._hold) / self.T_FADE
-                n = int(len(self._lines) * (1 - k))
-                if n != self._shown:
-                    self._shown = n
-                    changed = True
-            else:
-                self._finish()
-                return
+            self._finish()
+            return
 
         self._t += self.TICK_MS / 1000.0
         if changed:
@@ -313,11 +208,10 @@ class CrackedGlass(QWidget):
         self.playing = False
         self.hide()
         callback, self._on_done = self._on_done, None
-        self.finished.emit()
         if callback:
             callback()
 
-    # -- drawing helpers ------------------------------------------------------ #
+    # -- drawing -------------------------------------------------------------- #
     @staticmethod
     def _starburst(impact):
         cx, cy = impact
@@ -342,7 +236,6 @@ class CrackedGlass(QWidget):
         band = (rot(-34, 26), rot(34, 26))
         return body, band
 
-    # -- painting ------------------------------------------------------------- #
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -354,15 +247,14 @@ class CrackedGlass(QWidget):
             painter.setPen(ink_pen)
             painter.drawLine(p1, p2)
 
-        if self._burst_on:
+        if self._marks_on:
             pen = QPen(INK, 3)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
             painter.setBrush(BURST_FILL)
             painter.drawPolygon(self._burst)
 
-        if self._foot_on:
-            body, band = self._foot_shape(self._fx, self._fy)
+            body, band = self._foot_shape(*self._impact)
             pen = QPen(INK, 5)
             pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
             painter.setPen(pen)
@@ -375,54 +267,39 @@ class CrackedGlass(QWidget):
 
 
 # --------------------------------------------------------------------------- #
-# Demo
+# Public API: one function
 # --------------------------------------------------------------------------- #
+def play_cracked_glass(window, x, y, hold=2.5, on_done=None):
+    """Kick the glass in `window` at window-relative pixel (x, y).
+
+    Call it from the GUI thread; it returns immediately and animates via a
+    QTimer. The effect is drawn inside the window on top of its other widgets
+    and ignores the mouse. If the effect is already playing in that window the
+    call is ignored. `hold` is how long the cracks stay visible; `on_done` is
+    called when the animation is over.
+    """
+    if not isinstance(window, QWidget):
+        raise TypeError("play_cracked_glass needs a PyQt6 QWidget window")
+
+    effect = getattr(window, "_cracked_glass_effect", None)
+    if effect is None:
+        effect = _CrackedGlass(window)
+        window._cracked_glass_effect = effect
+
+    effect.play(x, y, hold=hold, on_done=on_done)
+    return effect
+
+
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(
-        description="Demo: play the cracked-glass kick in a window.")
-    ap.add_argument("--delay", type=float, default=1.0, help="seconds before it triggers")
-    ap.add_argument("--hold", type=float, default=2.5, help="seconds the cracks stay")
-    ap.add_argument("--impact", default="center",
-                    help="where the crack starts: center, top-left, cursor, "
-                         "500,300 (pixels) or 0.8,0.2 (fractions of the window)")
-    ap.add_argument("--x", type=float, default=None,
-                    help="crack start X in pixels (use together with --y; overrides --impact)")
-    ap.add_argument("--y", type=float, default=None,
-                    help="crack start Y in pixels (use together with --x; overrides --impact)")
-    ap.add_argument("--foot", default=None,
-                    help="where the foot starts (same formats as --impact); default: at the impact")
-    ap.add_argument("--dry-run", action="store_true",
-                    help="print the resolved crack start and exit without playing")
-    a = ap.parse_args()
-
-    if (a.x is None) != (a.y is None):
-        ap.error("--x and --y must be given together")
-
-    impact_spec = (a.x, a.y) if a.x is not None else parse_impact_arg(a.impact)
-    foot_spec = parse_impact_arg(a.foot) if a.foot else None
-
     app = QApplication(sys.argv)
     window = QWidget()
     window.setWindowTitle("Cracked Glass")
     window.resize(960, 600)
     window.setStyleSheet("background-color: #b9c8d4;")
-
-    glass = CrackedGlass(window)
-
-    if a.dry_run:
-        try:
-            x, y = resolve_impact(impact_spec, window.width(), window.height())
-        except ValueError as exc:
-            sys.exit(f"error: {exc}")
-        print(f"window {window.width()}x{window.height()}; "
-              f"crack would start at ({x:.0f}, {y:.0f})")
-        sys.exit(0)
-
     window.show()
-    print(f"Kicking the window in {a.delay:g}s...")
+
     QTimer.singleShot(
-        int(a.delay * 1000),
-        lambda: glass.play(impact=impact_spec, hold=a.hold,
-                           foot_start=foot_spec, on_done=app.quit),
+        800,
+        lambda: play_cracked_glass(window, 480, 300, on_done=app.quit),
     )
     sys.exit(app.exec())

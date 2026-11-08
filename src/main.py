@@ -17,6 +17,8 @@ from menu import menu
 from pipeline import run_gemini_pipeline
 import tts
 
+from test.cracked_glass import play_cracked_glass
+
 # Read the sidekick's lines aloud
 TTS_ENABLED = True
 
@@ -50,6 +52,8 @@ def main():
     display_app.ai_response_signal.emit(text, reaction)
     if TTS_ENABLED:
       tts.speak(text, config.get("personality"))
+
+  play_cracked_glass(display_app,10,10)
 
   pipeline_thread = threading.Thread(
       target=run_gemini_pipeline,
