@@ -355,7 +355,7 @@ class MascotDisplay(QWidget):
     bubble_w = min(
         max_bubble_w, max([metrics.horizontalAdvance(line) for line in wrapped] + [120]) + 24
     )
-    bubble_h = len(wrapped) * (metrics.height() + 2) + 20
+    bubble_h = len(wrapped) * (metrics.height() + 2) + 40
 
     drawW, _ = self._spriteSize(self.currentSprite)
     bx = self.mascotX + (drawW - bubble_w) // 2
