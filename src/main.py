@@ -3,64 +3,71 @@ import queue
 import sys
 import threading
 
-# Add src and subdirectories to sys.path
 _SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.extend([
     _SRC_DIR,
     os.path.join(_SRC_DIR, "display"),
     os.path.join(_SRC_DIR, "gemini"),
     os.path.join(_SRC_DIR, "menu"),
+    os.path.join(_SRC_DIR, "tts"),
 ])
 
 from display import MascotDisplay
 from menu import menu
 from pipeline import run_gemini_pipeline
+import tts
+
+# Read the sidekick's lines aloud
+TTS_ENABLED = True
 
 
 def main():
-  # 1. Launch Setup Menu (Runs PyQt QDialog)
   print("[Main] Launching configuration menu...")
   config = menu()
-
   if not config:
-    print("[Main] Setup cancelled by user. Exiting.")
+    print("[Main] Setup cancelled.")
     return 0
 
-  print("[Main] Config selected:")
-  print(f"  - Personality : {config['personality'].get('name')}")
-  print(f"  - Goal        : {config['goal']}")
-  print(f"  - Duration    : {config['duration_hms']}")
-  print(f"  - Interval    : {config['check_interval_seconds']}s")
-  print(f"  - Sprites     : {config['sprite_folder']}")
-
-  # Thread-safe queue for user interaction submitted through the mascot window
   user_input_queue = queue.Queue()
+  force_speak_event = threading.Event()
   stop_event = threading.Event()
 
   def handle_submit(text: str):
-    print(f"[Main] User replied to mascot: {text}")
+    print(f"[Main] User replied: {text}")
     user_input_queue.put(text)
 
-  # 2. Initialize Mascot Display Window (using default sprites)
-  display_app = MascotDisplay(onSubmit=handle_submit)
+  def handle_poke():
+    print("[Main] Poke button clicked -> Forcing Gemini speech!")
+    force_speak_event.set()
 
-  # Bridge callback from Gemini thread into MascotDisplay's PyQt signal
+  # Pass onPoke callback to MascotDisplay
+  display_app = MascotDisplay(onSubmit=handle_submit, onPoke=handle_poke)
+
+  if TTS_ENABLED:
+    tts.warm_up()
+
   def on_sidekick_speak(text: str, reaction: str):
     display_app.ai_response_signal.emit(text, reaction)
+    if TTS_ENABLED:
+      tts.speak(text, config.get("personality"))
 
-  # 3. Spawn Gemini pipeline in background daemon thread
   pipeline_thread = threading.Thread(
       target=run_gemini_pipeline,
-      args=(config, on_sidekick_speak, user_input_queue, stop_event),
+      args=(
+          config,
+          on_sidekick_speak,
+          user_input_queue,
+          force_speak_event,
+          stop_event,
+          display_app.isInputActive,
+      ),
       daemon=True,
   )
   pipeline_thread.start()
 
-  # 4. Start GUI event loop on main thread
   try:
     exit_code = display_app.run()
   finally:
-    # Graceful shutdown of pipeline thread on exit
     stop_event.set()
     pipeline_thread.join(timeout=1.0)
 

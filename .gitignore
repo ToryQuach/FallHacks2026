@@ -1,3 +1,6 @@
 __pycache__
 .env
 .venv
+# Kokoro voice models (downloaded automatically)
+src/tts/models/
+src/history/temp_screen.png
