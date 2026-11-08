@@ -12,8 +12,17 @@ Run from the project root:
 """
 
 import random
+import sys
 import time
 from datetime import datetime
+from pathlib import Path
+
+# Let Python find src/tts/tts.py (same trick gemini.py uses for history)
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tts"))
+import tts  # noqa: E402
+
+TTS_ENABLED = True
+
 
 from gemini import (
     HistoryQueue,
@@ -26,10 +35,10 @@ from gemini import (
 
 # Timing
 # Observation timing
-OBSERVE_SECONDS = 20
+OBSERVE_SECONDS = 5
 # Response timing
-RESPOND_MIN_SECONDS = 50      
-RESPOND_MAX_SECONDS = 70      
+RESPOND_MIN_SECONDS = 20      
+RESPOND_MAX_SECONDS = 30      
 
 # Memory size
 MEMORY_SIZE = 30
@@ -78,6 +87,9 @@ def main():
                     )
                     # TODO: send reply.reaction / reply.bubble_speech to src/display
                     print(f"[{timestamp}] SPEAK {reply.reaction}: {reply.bubble_speech}")
+                    if TTS_ENABLED:
+                        
+                        tts.speak(reply.bubble_speech, personality)
                     respond_at = next_response_time()
 
             except Exception as e:
