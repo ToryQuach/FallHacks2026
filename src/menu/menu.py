@@ -179,9 +179,9 @@ class SidekickConfigMenu(QDialog):
     # 5. Frequency Slider
     freq_container = QHBoxLayout()
     self.freq_slider = QSlider(Qt.Orientation.Horizontal)
-    self.freq_slider.setRange(10, 120)
-    self.freq_slider.setValue(30)
-    self.freq_label = QLabel("30s")
+    self.freq_slider.setRange(1, 120)
+    self.freq_slider.setValue(5)
+    self.freq_label = QLabel("5s")
 
     self.freq_slider.valueChanged.connect(
         lambda val: self.freq_label.setText(f"{val}s")

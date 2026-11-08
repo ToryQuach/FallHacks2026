@@ -188,6 +188,7 @@ def synthesize(text: str, personality: Personality = None) -> bytes:
 
 # Kokoro TTS (local)
 _kokoro = None
+_kokoro_lock = threading.Lock()
 
 
 def _espeak_data_dir() -> str:
@@ -203,6 +204,11 @@ def _espeak_data_dir() -> str:
 
 
 def _get_kokoro():
+    with _kokoro_lock:   # warm_up() and the speaker thread may race here
+        return _load_kokoro()
+
+
+def _load_kokoro():
     global _kokoro
     if _kokoro is None:
         from urllib.request import urlretrieve
@@ -306,6 +312,20 @@ def _speaker_loop() -> None:
     while True:
         text, personality = _lines.get()
         speak_now(text, personality)
+
+
+def warm_up() -> None:
+    """Load Kokoro in the background so the first line isn't delayed."""
+    if TTS_ENGINE != "kokoro":
+        return
+
+    def load():
+        try:
+            _get_kokoro()
+        except Exception as e:
+            print(f"[tts] couldn't preload Kokoro: {e}")
+
+    threading.Thread(target=load, daemon=True).start()
 
 
 def speak(text: str, personality: Personality = None) -> None:
