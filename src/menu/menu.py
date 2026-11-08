@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
-    QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
@@ -25,7 +24,6 @@ def load_personalities() -> List[Dict[str, Any]]:
 
   Falls back to a default mock profile if the directory is missing or empty.
   """
-  # Resolves src/menu/../../src/personalities -> src/personalities
   base_dir = Path(__file__).resolve().parent.parent / "personalities"
   personalities: List[Dict[str, Any]] = []
 
@@ -40,7 +38,6 @@ def load_personalities() -> List[Dict[str, Any]]:
       except (json.JSONDecodeError, OSError) as err:
         print(f"[Warning] Failed to parse personality file {file_path}: {err}")
 
-  # Fallback if no JSON files exist yet
   if not personalities:
     personalities.append({
         "name": "Draco Malfoid",
@@ -116,12 +113,7 @@ class SidekickConfigMenu(QDialog):
             }
         """)
 
-    # Default sprite folder resolution (src/sprites/default or local fallback)
-    default_sprite_dir = Path(__file__).resolve().parent.parent / "sprites"
-    self.selected_sprite_folder = str(default_sprite_dir)
     self.config_result: Optional[Dict[str, Any]] = None
-
-    # Load personality files
     self.personalities_data = load_personalities()
 
     # Main Layout
@@ -136,7 +128,6 @@ class SidekickConfigMenu(QDialog):
     # 1. Personality Dropdown
     self.personality_combo = QComboBox()
     for item in self.personalities_data:
-      # Display name is shown, full dictionary attached to Qt's UserRole
       self.personality_combo.addItem(item["name"], userData=item)
     form_layout.addRow("Personality:", self.personality_combo)
 
@@ -163,32 +154,40 @@ class SidekickConfigMenu(QDialog):
     time_container.addWidget(self.spin_secs)
     form_layout.addRow("Duration:", time_container)
 
-    # 4. Sprite Folder Picker
-    sprite_container = QHBoxLayout()
-    self.sprite_path_label = QLineEdit(self.selected_sprite_folder)
-    self.sprite_path_label.setReadOnly(True)
-
-    self.browse_btn = QPushButton("Browse")
-    self.browse_btn.setObjectName("secondaryBtn")
-    self.browse_btn.clicked.connect(self._browse_sprite_folder)
-
-    sprite_container.addWidget(self.sprite_path_label)
-    sprite_container.addWidget(self.browse_btn)
-    form_layout.addRow("Sprite Folder:", sprite_container)
-
-    # 5. Frequency Slider
+    # 4. Check Interval Slider
     freq_container = QHBoxLayout()
     self.freq_slider = QSlider(Qt.Orientation.Horizontal)
     self.freq_slider.setRange(1, 120)
     self.freq_slider.setValue(5)
     self.freq_label = QLabel("5s")
-
     self.freq_slider.valueChanged.connect(
         lambda val: self.freq_label.setText(f"{val}s")
     )
     freq_container.addWidget(self.freq_slider)
     freq_container.addWidget(self.freq_label)
     form_layout.addRow("Check Interval:", freq_container)
+
+    # 5. Speak Min Seconds Slider
+    speak_min_container = QHBoxLayout()
+    self.speak_min_slider = QSlider(Qt.Orientation.Horizontal)
+    self.speak_min_slider.setRange(2, 120)
+    self.speak_min_slider.setValue(6)
+    self.speak_min_label = QLabel("6s")
+    self.speak_min_slider.valueChanged.connect(self._on_speak_min_changed)
+    speak_min_container.addWidget(self.speak_min_slider)
+    speak_min_container.addWidget(self.speak_min_label)
+    form_layout.addRow("Speak Min Time:", speak_min_container)
+
+    # 6. Speak Max Seconds Slider
+    speak_max_container = QHBoxLayout()
+    self.speak_max_slider = QSlider(Qt.Orientation.Horizontal)
+    self.speak_max_slider.setRange(2, 180)
+    self.speak_max_slider.setValue(7)
+    self.speak_max_label = QLabel("7s")
+    self.speak_max_slider.valueChanged.connect(self._on_speak_max_changed)
+    speak_max_container.addWidget(self.speak_max_slider)
+    speak_max_container.addWidget(self.speak_max_label)
+    form_layout.addRow("Speak Max Time:", speak_max_container)
 
     main_layout.addLayout(form_layout)
 
@@ -217,13 +216,17 @@ class SidekickConfigMenu(QDialog):
     box.setSuffix(f" {suffix}")
     return box
 
-  def _browse_sprite_folder(self):
-    folder = QFileDialog.getExistingDirectory(
-        self, "Select Sprite Directory", self.selected_sprite_folder
-    )
-    if folder:
-      self.selected_sprite_folder = folder
-      self.sprite_path_label.setText(folder)
+  def _on_speak_min_changed(self, val: int):
+    self.speak_min_label.setText(f"{val}s")
+    # Guarantee min doesn't exceed max
+    if val > self.speak_max_slider.value():
+      self.speak_max_slider.setValue(val)
+
+  def _on_speak_max_changed(self, val: int):
+    self.speak_max_label.setText(f"{val}s")
+    # Guarantee max isn't lower than min
+    if val < self.speak_min_slider.value():
+      self.speak_min_slider.setValue(val)
 
   def _on_launch(self):
     total_seconds = (
@@ -241,8 +244,9 @@ class SidekickConfigMenu(QDialog):
         "duration_hms": (
             f"{self.spin_hours.value():02d}:{self.spin_mins.value():02d}:{self.spin_secs.value():02d}"
         ),
-        "sprite_folder": self.selected_sprite_folder,
         "check_interval_seconds": self.freq_slider.value(),
+        "speak_min_seconds": self.speak_min_slider.value(),
+        "speak_max_seconds": self.speak_max_slider.value(),
     }
     self.accept()
 

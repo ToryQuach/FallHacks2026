@@ -41,7 +41,8 @@ def main():
     force_speak_event.set()
 
   # Pass onPoke callback to MascotDisplay
-  display_app = MascotDisplay(onSubmit=handle_submit, onPoke=handle_poke)
+  session_duration = config.get("duration_seconds", 0)
+  display_app = MascotDisplay(onSubmit=handle_submit, onPoke=handle_poke, duration_seconds = session_duration)
 
   if TTS_ENABLED:
     tts.warm_up()

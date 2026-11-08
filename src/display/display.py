@@ -17,6 +17,12 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import QApplication, QWidget
 from mascot import Mascot
 
+# Import the countdown timer widget
+try:
+  from display.timer_widget import DraggableCountdownWidget
+except ImportError:
+  from timer_widget import DraggableCountdownWidget
+
 DEBUG = True
 
 
@@ -55,10 +61,7 @@ class MascotDisplay(QWidget):
   """Fullscreen transparent, stay-on-top window displaying an interactive mascot."""
 
   ai_response_signal = pyqtSignal(str, str)
-
-  def isInputActive(self) -> bool:
-    """Returns True if the mascot is currently in SCROLL mode (typing input open)."""
-    return bool(self.isScrolling)
+  shutdown_requested_signal = pyqtSignal()
 
   def __init__(
       self,
@@ -67,6 +70,7 @@ class MascotDisplay(QWidget):
       className: str = "MainWin",
       onSubmit=None,
       onPoke=None,
+      duration_seconds: int = 0,
       sprite_folder: str = None,
   ):
     self._app = QApplication.instance()
@@ -80,6 +84,8 @@ class MascotDisplay(QWidget):
     self.scale = scale
     self.onSubmit = onSubmit
     self.onPoke = onPoke  # Callback to force Gemini speech
+    self.duration_seconds = duration_seconds
+    self.countdown_widget = None
 
     # 1. Native Window Configuration
     self.setWindowFlags(
@@ -99,10 +105,6 @@ class MascotDisplay(QWidget):
 
     self.previousState = self.mascot.getState()
     self.isScrolling = False
-
-    def isInputActive(self) -> bool:
-        """Returns True if the mascot is currently in SCROLL mode (typing input open)."""
-        return bool(self.isScrolling)
 
     # Mascot coordinates inside window
     self.mascotX = 0
@@ -153,10 +155,32 @@ class MascotDisplay(QWidget):
     self.wanderTimer = QTimer(self)
     self.wanderTimer.setInterval(WANDER_INTERVAL_MS)
     self.wanderTimer.timeout.connect(self._updateWander)
+
+  # ----------------------------------------------------------- State Checkers
+  def isInputActive(self) -> bool:
+    """Returns True if the mascot is currently in SCROLL mode (typing input open)."""
+    return bool(self.isScrolling)
+
   # ------------------------------------------------------------- Lifecycle
   def run(self) -> int:
-    screen_geo = QApplication.primaryScreen().geometry()
+    primary_screen = QApplication.primaryScreen()
+    screen_geo = (
+        primary_screen.geometry()
+        if primary_screen
+        else QRect(0, 0, SCREEN_WIDTH, SCREEN_HEIGHT)
+    )
     self.setGeometry(screen_geo)
+
+    # Launch Countdown HUD if duration was set
+    if self.duration_seconds > 0:
+      self.countdown_widget = DraggableCountdownWidget(self.duration_seconds)
+      top_right_x = (
+          screen_geo.x() + screen_geo.width() - self.countdown_widget.width() - 24
+      )
+      top_right_y = screen_geo.y() + 24
+      self.countdown_widget.move(top_right_x, top_right_y)
+      self.countdown_widget.timeout.connect(self._on_time_expired)
+      self.countdown_widget.show()
 
     first = self.mascot.getNextImage()
     if not first:
@@ -178,6 +202,23 @@ class MascotDisplay(QWidget):
     if self._owns_app:
       return self._app.exec()
     return 0
+
+  def _on_time_expired(self):
+    """Triggers farewell speech and cleans up on session expiration."""
+    print("[MascotDisplay] Session timer reached 0. Terminating application...")
+    self.setSpeech("Time's up! Great session today. Bye!", "happiness")
+    QTimer.singleShot(1500, self._terminate_app)
+
+  def _terminate_app(self):
+    if self.countdown_widget:
+      self.countdown_widget.close()
+    self.close()
+    QApplication.quit()
+
+  def closeEvent(self, event):
+    if self.countdown_widget:
+      self.countdown_widget.close()
+    super().closeEvent(event)
 
   # ---------------------------------------------------------- AI Integration
   def setSpeech(self, text: str, reaction: str = ""):
@@ -203,7 +244,9 @@ class MascotDisplay(QWidget):
 
   # --------------------------------------------------------------- Wandering
   def _wanderBounds(self) -> QRect:
-    screen = self.screen()
+    screen = self.screen() or QApplication.primaryScreen()
+    if not screen:
+      return QRect(0, 0, self.width(), self.height())
     avail = screen.availableGeometry()
     geo = screen.geometry()
     return QRect(
@@ -350,12 +393,13 @@ class MascotDisplay(QWidget):
     if not self.bubbleText:
       return QRect()
     metrics = QFontMetrics(self.bubbleFont)
-    max_bubble_w = 300
+    max_bubble_w = 400
     wrapped = self._wrapLines(self.bubbleText, max_bubble_w - 20)
     bubble_w = min(
-        max_bubble_w, max([metrics.horizontalAdvance(line) for line in wrapped] + [120]) + 24
+        max_bubble_w,
+        max([metrics.horizontalAdvance(line) for line in wrapped] + [120]) + 40,
     )
-    bubble_h = len(wrapped) * (metrics.height() + 2) + 40
+    bubble_h = len(wrapped) * (metrics.height() + 2) + 20
 
     drawW, _ = self._spriteSize(self.currentSprite)
     bx = self.mascotX + (drawW - bubble_w) // 2
@@ -614,6 +658,7 @@ def handleSubmit(text):
 
 def main():
   return MascotDisplay(onSubmit=handleSubmit).run()
+
 
 if __name__ == "__main__":
   print("display.py loaded from", os.path.abspath(__file__))
